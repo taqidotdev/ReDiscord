@@ -2,101 +2,107 @@ import { chromium, type Locator } from "patchright";
 import { saveVideo } from "playwright-video";
 
 // const browser = await chromium.launch();
-const browser = await chromium.launch({headless: false});
+const browser = await chromium.launch({
+	headless: false,
+	ignoreDefaultArgs: ["--mute-audio"]
+});
 const context = await browser.newContext({
-    baseURL: "https://discord.com",
-    viewport: {
-        width: 1920,
-        height: 1080,
-    },
-    reducedMotion: "reduce",
+	baseURL: "https://discord.com",
+	viewport: {
+		width: 1920,
+		height: 1080,
+	},
+	reducedMotion: "reduce",
 });
 const page = await context.newPage();
 
 // @ts-expect-error
-const capture = await saveVideo(page, 'videos/quality.mkv', {
-    fps: 60,
+const capture = await saveVideo(page, "videos/quality.mkv", {
+	fps: 60,
 });
 
 await page.goto("/channels/@me");
 
 await page.evaluate(() => {
-  
-  setInterval(() => {
-    const iframe = document.createElement('iframe');
-    document.body.appendChild(iframe);
+	setInterval(() => {
+		const iframe = document.createElement("iframe");
+		document.body.appendChild(iframe);
 
-    if (!iframe.contentWindow?.localStorage) return;
-    
-    iframe.contentWindow.localStorage.token = `"${process.env.DISCORD_TOKEN}"`;
-  }, 50);
+		if (!iframe.contentWindow?.localStorage) return;
 
-  setTimeout(() => {
-    location.reload();
-  }, 2500);
+		iframe.contentWindow.localStorage.token = `"${process.env.DISCORD_TOKEN}"`;
+	}, 50);
 
-})
+	setTimeout(() => {
+		location.reload();
+	}, 2500);
+});
 
 const notificationRegEx = /^\((.*?)\)/;
 const ackRegEx = /\/ack\/?$/i;
 
 async function handleRecord() {
-    let lastElement: Locator;
-    while (true) {
-        const title = await page.title();
-        if (notificationRegEx.test(title)) {
-            await page.keyboard.press("Control+Alt+Shift+ArrowDown");
-                        
-            let acknowledged = false;
-            page.waitForRequest(ackRegEx).then(() => acknowledged = true);
+	let lastElement: Locator;
+	while (true) {
+		const title = await page.title();
+		if (notificationRegEx.test(title)) {
+			await page.keyboard.press("Control+Alt+Shift+ArrowDown");
 
-            while (!acknowledged) {
-                page.keyboard.press("Escape");
-                await page.waitForTimeout(1000);
-            }
+			let acknowledged = false;
+			page.waitForRequest(ackRegEx).then(() => (acknowledged = true));
 
-            lastElement = page.getByRole("list", {name: "Messages in " }).locator("li").last();
-            console.log(await lastElement.getByText(/^record.*/i).count());
-            if (await lastElement.getByText(/^record.*/i).count()) break;
+			while (!acknowledged) {
+				page.keyboard.press("Escape");
+				await page.waitForTimeout(1000);
+			}
 
-            setTimeout(async () => await page.goto("/channels/@me"), 500);
-        }
+			lastElement = page
+				.getByRole("list", { name: "Messages in " })
+				.locator("li")
+				.last();
+			console.log(await lastElement.getByText(/^record.*/i).count());
+			if (await lastElement.getByText(/^record.*/i).count()) break;
 
-        await new Promise(res => setTimeout(res, 1000));
-    }
+			setTimeout(async () => await page.goto("/channels/@me"), 500);
+		}
 
-    console.log("recording")
+		await new Promise((res) => setTimeout(res, 1000));
+	}
 
-    const isVoice = await lastElement.getByText("Join Voice").isVisible();
-    
-    await lastElement.getByRole("button").getByText("Join").click();
+	console.log("recording");
 
-    if (isVoice) {
-    console.log("visible");  
-    await page.getByRole("button").getByText("Watch Stream").click();
+	const isVoice = await lastElement.getByText("Join Voice").isVisible();
 
-    } else {
-        console.log("invisible");
+	await lastElement.getByRole("button").getByText("Join").click();
 
-        await page.getByRole("button").getByText("Got it!").click();
-        await page.getByRole("button", { name: "Call tile, stream" }).locator("..").click();
-    }
-    
-    await page.getByRole("button", { name: "Show Chat" }).click();
-    
-    await page.evaluate(() => {
-        const sidebar = document.querySelector('[class^="sidebar"]') as HTMLElement;
-        if (!sidebar) return;
-        sidebar.style.display = "none";
-    });
+	if (isVoice) {
+		console.log("visible");
+		await page.getByRole("button").getByText("Watch Stream").click();
+	} else {
+		console.log("invisible");
 
-    await page.waitForTimeout(3000);
+		await page.getByRole("button").getByText("Got it!").click();
+		await page
+			.getByRole("button", { name: "Call tile, stream" })
+			.locator("..")
+			.click();
+	}
 
-    await capture.stop()
+	await page.getByRole("button", { name: "Show Chat" }).click();
 
-    console.log("stop recording");
+	await page.evaluate(() => {
+		const sidebar = document.querySelector('[class^="sidebar"]') as HTMLElement;
+		if (!sidebar) return;
+		sidebar.style.display = "none";
+	});
 
-    handleRecord();
+	await page.waitForTimeout(3000);
+
+	await capture.stop();
+
+	console.log("stop recording");
+
+	handleRecord();
 }
 
 handleRecord();
