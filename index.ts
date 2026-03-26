@@ -1,5 +1,7 @@
 import { chromium, type Locator } from "patchright";
 import { saveVideo } from "playwright-video";
+import "dotenv/config";
+
 
 // const browser = await chromium.launch();
 const browser = await chromium.launch({
@@ -16,27 +18,22 @@ const context = await browser.newContext({
 });
 const page = await context.newPage();
 
-// @ts-expect-error
-const capture = await saveVideo(page, "videos/quality.mkv", {
-	fps: 60,
-});
-
 await page.goto("/channels/@me");
 
-await page.evaluate(() => {
+await page.evaluate((token) => {
 	setInterval(() => {
 		const iframe = document.createElement("iframe");
 		document.body.appendChild(iframe);
 
 		if (!iframe.contentWindow?.localStorage) return;
 
-		iframe.contentWindow.localStorage.token = `"${process.env.DISCORD_TOKEN}"`;
+		iframe.contentWindow.localStorage.token = `"${token}"`;
 	}, 50);
 
 	setTimeout(() => {
 		location.reload();
 	}, 2500);
-});
+}, process.env.DISCORD_TOKEN);
 
 const notificationRegEx = /^\((.*?)\)/;
 const ackRegEx = /\/ack\/?$/i;
@@ -96,7 +93,12 @@ async function handleRecord() {
 		sidebar.style.display = "none";
 	});
 
-	await page.waitForTimeout(3000);
+    // @ts-expect-error
+    const capture = await saveVideo(page, "videos/quality.mkv", {
+        fps: 60,
+    });
+
+	await page.waitForTimeout(5000);
 
 	await capture.stop();
 
