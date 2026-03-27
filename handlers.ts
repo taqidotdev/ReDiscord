@@ -1,4 +1,4 @@
-import { chromium } from "patchright";
+import { type BrowserContext, chromium } from "patchright";
 import { saveVideo } from "playwright-video";
 import "dotenv/config";
 
@@ -6,6 +6,7 @@ const browser = await chromium.launch({
 	// headless: false,
 	ignoreDefaultArgs: ["--mute-audio"],
 });
+const contexts: Map<string, BrowserContext> = new Map();
 
 let capture : Awaited<ReturnType<typeof saveVideo>>;
 
@@ -20,6 +21,9 @@ export async function startRecording(
 		},
 		reducedMotion: "reduce",
 	});
+
+	contexts.set(inviteLink, context);
+
 	const page = await context.newPage();
 
 	const res = await page.goto(inviteLink);
@@ -71,9 +75,25 @@ export async function startRecording(
 	return { context, page };
 }
 
-export async function endRecording() {
+export async function endRecording(inviteLink: string) {
 	console.log("stop recording");
+
+	const context = contexts.get(inviteLink);
+
+	if (!context) throw new Error("Recording not found");
+
+	contexts.delete(inviteLink);
+
 	await capture.stop();
-	browser.close();
+	context.close();
 	return;
+}
+
+export function displayRecordings() {
+	let recordings = "";
+	contexts.forEach((_, link) => {
+		recordings += `${link}\n`;
+	})
+
+	return recordings;
 }

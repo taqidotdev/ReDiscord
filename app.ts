@@ -1,9 +1,13 @@
 import express from "express";
-import { endRecording, startRecording } from "./handlers.ts";
+import { displayRecordings, endRecording, startRecording } from "./handlers.ts";
 
 const app = express();
 
 app.use(express.json());
+
+app.get("/", async (_req, res) => {
+	res.status(200).send(displayRecordings())
+})
 
 app.post("/", async (req, res) => {
 	const { channelInviteLink, channelType } = req.body;
@@ -25,11 +29,17 @@ app.post("/", async (req, res) => {
 			.send("Recording failed to start, ensure correct data was entered");
 		return;
 	});
-	res.status(200).send("Recording started");
+	res.status(200).send("Recording started, use DELETE with the invite link to stop recording");
 });
 
-app.delete("/", async (_req, res) => {
-	endRecording();
+app.delete("/", async (req, res) => {
+	const { channelInviteLink } = req.body; 
+
+	if (!channelInviteLink) {
+		res.status(400).send("Valid invite link not provided, use GET to display ongoing recordings");
+	}
+
+	endRecording(channelInviteLink);
 	res.status(200).send("Recording stopped");
 });
 
