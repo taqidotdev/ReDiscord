@@ -6,8 +6,8 @@ const app = express();
 app.use(express.json());
 
 app.get("/", async (_req, res) => {
-	res.status(200).send(displayRecordings())
-})
+	res.status(200).send(displayRecordings());
+});
 
 app.post("/", async (req, res) => {
 	const { channelInviteLink, channelType } = req.body;
@@ -23,20 +23,32 @@ app.post("/", async (req, res) => {
 		return;
 	}
 
-	await startRecording(channelInviteLink, channelType).catch(() => {
+	try {
+		await startRecording(channelInviteLink, channelType);
+	} catch (e) {
 		res
 			.status(404)
-			.send("Recording failed to start, ensure correct data was entered");
+			.send(
+				`Recording failed to start, ensure correct data was entered. Error: ${e}`,
+			);
 		return;
-	});
-	res.status(200).send("Recording started, use DELETE with the invite link to stop recording");
+	}
+	res
+		.status(200)
+		.send(
+			"Recording started, use DELETE with the invite link to stop recording",
+		);
 });
 
 app.delete("/", async (req, res) => {
-	const { channelInviteLink } = req.body; 
+	const { channelInviteLink } = req.body;
 
 	if (!channelInviteLink) {
-		res.status(400).send("Valid invite link not provided, use GET to display ongoing recordings");
+		res
+			.status(400)
+			.send(
+				"Valid invite link not provided, use GET to display ongoing recordings",
+			);
 	}
 
 	endRecording(channelInviteLink);
