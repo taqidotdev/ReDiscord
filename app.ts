@@ -10,7 +10,7 @@ app.get("/", async (_req, res) => {
 });
 
 app.post("/", async (req, res) => {
-	const { channelInviteLink, channelType, sendMessages, streamer } = req.body;
+	const { channelInviteLink, channelType, sendMessages, streamer, fileName } = req.body;
 	if (
 		typeof channelInviteLink !== "string" ||
 		(channelType !== "voice" && channelType !== "stage")
@@ -18,9 +18,13 @@ app.post("/", async (req, res) => {
 		res
 			.status(400)
 			.send(
-				"Invalid request body, expected { channelInviteLink: string, channelType: 'voice' | 'stage', streamer?: string, sendMessages?: boolean }",
+				"Invalid request body, expected { channelInviteLink: string, channelType: 'voice' | 'stage', streamer?: string, sendMessages?: boolean, fileName?: string }",
 			);
 		return;
+	}
+
+	if (!channelInviteLink.includes("discord")) {
+		res.status(400).send("Discord invite link not provided");
 	}
 
 	try {
@@ -29,6 +33,7 @@ app.post("/", async (req, res) => {
 			channelType,
 			sendMessages,
 			streamer,
+			fileName
 		);
 	} catch (e) {
 		res

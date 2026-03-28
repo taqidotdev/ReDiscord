@@ -1,17 +1,26 @@
+import fs from "node:fs";
 import { type BrowserContext, chromium, type Page } from "patchright";
-import { saveVideo } from "playwright-video";
 import "dotenv/config";
 
+if (!process.env.DISCORD_TOKEN) throw new Error("DISCORD_TOKEN not specified");
+
 const browser = await chromium.launch({
-	// headless: false,
+	headless: false,
+	args: [
+		"--disable-features=WebRtcHideLocalIpsWithMdns",
+		"--use-fake-ui-for-media-stream",
+		"--enable-usermedia-screen-capturing",
+	],
 	ignoreDefaultArgs: ["--mute-audio"],
 });
 const contextsInfo: Map<
 	string,
-	{ context: BrowserContext; streamInterval: NodeJS.Timeout | null, sendMessagesPage?: Page }
+	{
+		context: BrowserContext;
+		page: Page;
+		sendMessages?: boolean;
+	}
 > = new Map();
-
-let capture: Awaited<ReturnType<typeof saveVideo>>;
 
 async function messageBase(page: Page, message: string) {
 	try {
@@ -26,8 +35,9 @@ async function messageBase(page: Page, message: string) {
 export async function startRecording(
 	inviteLink: string,
 	channelType: "voice" | "stage",
-	sendMessages: boolean = false,
+	sendMessages?: boolean,
 	streamer?: string,
+	fileName?: string,
 ) {
 	const context = await browser.newContext({
 		viewport: {
@@ -37,128 +47,208 @@ export async function startRecording(
 		reducedMotion: "reduce",
 	});
 
-	const page = await context.newPage();
+	try {
+		const page = await context.newPage();
 
-	const message = sendMessages
-		? (message: string) => messageBase(page, message)
-		: () => {};
+		const message = sendMessages
+			? (message: string) => messageBase(page, message)
+			: () => {};
 
-	const res = await page.goto(inviteLink);
+		const res = await page.goto(inviteLink);
 
-	if (!res?.ok()) {
-		throw new Error("Invalid Link");
-	}
+		if (!res?.ok()) {
+			throw new Error("Invalid Link");
+		}
 
-	await page.evaluate((token) => {
-		setInterval(() => {
+		await page.evaluate((token) => {
 			const iframe = document.createElement("iframe");
 			document.body.appendChild(iframe);
 
 			if (!iframe.contentWindow?.localStorage) return null;
 
 			iframe.contentWindow.localStorage.token = `"${token}"`;
-		}, 50);
 
-		setTimeout(() => {
-			location.reload();
-		}, 2500);
-	}, process.env.DISCORD_TOKEN);
+			document.body.removeChild(iframe);
 
-	await page.getByRole("button").getByText("Accept Invite").click();
+			setTimeout(() => {
+				location.reload();
+			}, 2500);
+		}, process.env.DISCORD_TOKEN);
 
-	if (channelType === "stage")
-		await page
-			.getByRole("button")
-			.getByText("Got it!")
-			.click({ timeout: 5000 })
-			.catch();
-
-	console.log("trying to show chat");
-
-	await page.getByRole("button", { name: "Show Chat" }).click();
-
-	console.log("showed chat, hiding sidebar");
-
-	await page.evaluate(() => {
-		const sidebar = document.querySelector('[class^="sidebar"]') as HTMLElement;
-		if (!sidebar) return;
-		sidebar.style.display = "none";
-	});
-
-	console.log("hid sidebar");
-
-	let streamInterval: NodeJS.Timeout | null = null;
-
-	if (streamer) {
-		const watchStream = async (timeout: number = 60000) =>
+		// try {
+		// 	await page
+		// 		.getByRole("button", { name: "Continue in Browser" })
+		// 		.click({ timeout: 10000 });
+		// } catch {
+		try {
 			await page
-				.getByRole("button", { name: `Call tile, stream, ${streamer}` })
-				.locator("..")
-				.click({ timeout })
-				.catch(async (e) => {
+				.getByRole("button")
+				.getByText("Accept Invite")
+				.click({ timeout: 10000 });
+			await (new Promise((res) =>
+				setTimeout(async () => {
+					await page.keyboard.press("Escape");
+					res();
+				}, 1000),
+			) as Promise<void>);
+		} catch {}
+		// }
+
+		if (channelType === "stage")
+			await page
+				.getByRole("button")
+				.getByText("Got it!")
+				.click({ timeout: 5000 })
+				.catch();
+
+		console.log("trying to show chat");
+
+		await page.getByRole("button", { name: "Show Chat" }).click();
+
+		console.log("showed chat, hiding sidebar");
+
+		await page.evaluate(() => {
+			const sidebar = document.querySelector(
+				'[class^="sidebar"]',
+			) as HTMLElement;
+			if (!sidebar) return;
+			sidebar.style.display = "none";
+		});
+
+		console.log("hid sidebar");
+
+		if (streamer) {
+			const handleStreamClose = () => {
+				const closeStreamButton = page
+					.getByRole("button", { name: "Close Stream" })
+					.first();
+				console.log("handling stream");
+				closeStreamButton.waitFor().then(async () => {
+					console.log("stream closed");
+					await closeStreamButton.click();
+					console.log("close stream button clicked");
+					await watchStream();
+					console.log("watching for stream");
+				});
+			};
+
+			const watchStream: (
+				timeout?: number,
+				recursive?: boolean,
+			) => Promise<void> = async (timeout = 60000, recursive = true) => {
+				try {
+					await page
+						.getByRole("button", { name: `Call tile, stream, ${streamer}` })
+						.locator("..")
+						.click({ timeout });
+					handleStreamClose();
+					message(`Connected to ${streamer}'s stream`);
+				} catch (e) {
+					if (!(e instanceof Error)) return;
 					if (e.name === "TimeoutError") {
 						await message(
 							`Stream doesn't exist, waiting for ${streamer} to stream`,
 						);
-						await watchStream(60000);
+						if (recursive) await watchStream();
 					} else {
 						console.log(e);
 					}
+				}
+			};
+
+			message(`Attempting to connect to ${streamer}'s stream`);
+			await watchStream(5000);
+		}
+
+		fs.mkdirSync("./videos", { recursive: true });
+		const writeStream = fs.createWriteStream(
+			`./videos/${`${fileName ?? `${inviteLink.split("/").at(-1)}-${Date.now()}`}`}.webm`,
+			{ flags: "a" },
+		);
+
+		await page.exposeFunction("write", (bufferData: number[]) => {
+			writeStream.write(Buffer.from(bufferData));
+		});
+		await page.exposeFunction("end", writeStream.end.bind(writeStream));
+
+		await page.evaluate(async () => {
+			navigator.mediaDevices
+				.getDisplayMedia({
+					video: true,
+					audio: {
+						// @ts-expect-error
+						chromeMediaSource: "tab",
+					},
+					preferCurrentTab: true,
+				})
+				.then((mediaStream) => {
+					const recorderWindow = window as unknown as Window & {
+						_recorder: MediaRecorder;
+						write: (data: number[]) => boolean;
+						end: () => void;
+					};
+					recorderWindow._recorder = new MediaRecorder(mediaStream, {
+						mimeType: "video/webm;codecs=vp9,opus",
+					});
+
+					recorderWindow._recorder.ondataavailable = async (blobChunk) => {
+						const buffer = await blobChunk.data.arrayBuffer();
+						recorderWindow.write(Array.from(new Uint8Array(buffer)));
+					};
+					recorderWindow._recorder.onstop = () => {
+						recorderWindow.end();
+					};
+
+					recorderWindow._recorder.start(1000);
 				});
+		});
 
-		message(`Attempting to connect to ${streamer}'s stream`);
-		await watchStream(5000);
-		message(`Connected to ${streamer}'s stream`);
+		message("Started recording");
 
-		streamInterval = setInterval(async () => {
-			console.log("checking stream");
-			const closeStream = page
-				.getByRole("button", { name: "Close Stream" })
-				.first();
-			if (await closeStream.isVisible()) {
-				await closeStream.click();
-				await message(`${streamer}'s stream stopped, waiting for stream`);
-				await watchStream();
-				await message(`Reconnected to ${streamer}'s stream`);
-			}
-		}, 2500);
+		contextsInfo.set(inviteLink, {
+			context,
+			page,
+			sendMessages,
+		});
+	} catch (e) {
+		await context.close();
+		throw e;
 	}
 
-	// @ts-expect-error
-	capture = await saveVideo(page, "videos/quality.mkv", {
-		fps: 60,
-	});
-
-	message("Started recording");
-
-	contextsInfo.set(inviteLink, { context, streamInterval, sendMessagesPage: (sendMessages ? page : undefined) });
-
-	return { context, page };
+	return;
 }
 
 export async function endRecording(inviteLink: string) {
 	console.log("stop recording");
 
-	const { context, streamInterval, sendMessagesPage } = contextsInfo.get(inviteLink) ?? {};
+	const { context, page, sendMessages } = contextsInfo.get(inviteLink) ?? {};
 
 	if (!context) throw new Error("Recording not found");
-	if (streamInterval) clearInterval(streamInterval);
+	if (!page) throw new Error("Page not found");
 
-	await capture.stop();
+	await page.evaluate(() => {
+		const recorderWindow = window as unknown as Window & {
+			_recorder: MediaRecorder;
+			write: (data: number[]) => boolean;
+			end: () => void;
+		};
+		recorderWindow._recorder.stop();
+	});
+
 	contextsInfo.delete(inviteLink);
 
-	if (sendMessagesPage) await messageBase(sendMessagesPage, "Stopped recording").catch();
+	if (sendMessages) await messageBase(page, "Stopped recording").catch();
 
-	context.close();
+	await context.close();
+
 	return;
 }
 
 export function displayRecordings() {
-	let recordings = contextsInfo.size ? "" : "No recordings in progess";
+	let recordings = contextsInfo.size ? "" : "No recordings in progress";
 	contextsInfo.forEach((_, link) => {
 		recordings += `${link}\n`;
 	});
 
 	return recordings;
 }
-
