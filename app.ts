@@ -10,7 +10,7 @@ app.get("/", async (_req, res) => {
 });
 
 app.post("/", async (req, res) => {
-	const { channelInviteLink, channelType } = req.body;
+	const { channelInviteLink, channelType, sendMessages, streamer } = req.body;
 	if (
 		typeof channelInviteLink !== "string" ||
 		(channelType !== "voice" && channelType !== "stage")
@@ -18,16 +18,21 @@ app.post("/", async (req, res) => {
 		res
 			.status(400)
 			.send(
-				"Invalid request body, expected { channelInviteLink: string, channelType: 'voice' | 'stage' }",
+				"Invalid request body, expected { channelInviteLink: string, channelType: 'voice' | 'stage', streamer?: string, sendMessages?: boolean }",
 			);
 		return;
 	}
 
 	try {
-		await startRecording(channelInviteLink, channelType);
+		await startRecording(
+			channelInviteLink,
+			channelType,
+			sendMessages,
+			streamer,
+		);
 	} catch (e) {
 		res
-			.status(404)
+			.status(400)
 			.send(
 				`Recording failed to start, ensure correct data was entered. Error: ${e}`,
 			);
@@ -51,7 +56,12 @@ app.delete("/", async (req, res) => {
 			);
 	}
 
-	endRecording(channelInviteLink);
+	try {
+		endRecording(channelInviteLink);
+	} catch (e) {
+		res.status(400).send(`Error occured while stopping recording: ${e}`);
+		return;
+	}
 	res.status(200).send("Recording stopped");
 });
 

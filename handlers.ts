@@ -1,157 +1,164 @@
-import fs from "node:fs";
+import { type BrowserContext, chromium, type Page } from "patchright";
+import { saveVideo } from "playwright-video";
 import "dotenv/config";
-import { launch, getStream } from "puppeteer-stream";
-import puppeteer from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import type Stream from "node:stream";
-import type { Page } from "puppeteer-core";
 
-const stealthPuppeteer = puppeteer.use(StealthPlugin());
-
-// const browser = await chromium.launch({
-const browser = await launch(stealthPuppeteer, {
-	executablePath: "./chrome/win64-147.0.7727.24/chrome-win64/chrome.exe",
-	// headless: "new",
-	defaultViewport: {
-		width: 1920,
-		height: 1080,
-	},
-	args: ["--force-prefers-reduced-motion"],
-	startDelay: 2000,
+const browser = await chromium.launch({
+	// headless: false,
+	ignoreDefaultArgs: ["--mute-audio"],
 });
-const pagesInfo: Map<
+const contextsInfo: Map<
 	string,
-	{ page: Page; file: fs.WriteStream; stream: Stream.Transform }
+	{ context: BrowserContext; streamInterval: NodeJS.Timeout | null, sendMessagesPage?: Page }
 > = new Map();
 
-// let capture: Awaited<ReturnType<typeof saveVideo>>;
+let capture: Awaited<ReturnType<typeof saveVideo>>;
 
-function buttonLocator(
-	page: Page,
-	text: string,
-	extraQuery: string = "",
-	timeout: number = 30000,
-) {
-	return page.waitForSelector(
-		`::-p-xpath(//*[@role="button" and contains(., "${text}")])${extraQuery}, button::-p-text(${text})${extraQuery}`,
-		{
-			timeout,
-		},
-	);
+async function messageBase(page: Page, message: string) {
+	try {
+		console.log(`attempting to send "${message}"`);
+		await page.getByRole("textbox", { name: "Message" }).fill(message);
+		await page.keyboard.press("Enter");
+	} catch (e) {
+		console.log(e);
+	}
 }
 
 export async function startRecording(
 	inviteLink: string,
 	channelType: "voice" | "stage",
+	sendMessages: boolean = false,
+	streamer?: string,
 ) {
-	if (pagesInfo.get(inviteLink)) {
-		throw new Error("Recording already in progress, use DELETE to stop it");
-	}
-	const page = await browser.newPage();
+	const context = await browser.newContext({
+		viewport: {
+			width: 1920,
+			height: 1080,
+		},
+		reducedMotion: "reduce",
+	});
 
-	const res = await page.goto("https://www.youtube.com/shorts/tAen-tB_vAI");
+	const page = await context.newPage();
+
+	const message = sendMessages
+		? (message: string) => messageBase(page, message)
+		: () => {};
+
+	const res = await page.goto(inviteLink);
+
 	if (!res?.ok()) {
 		throw new Error("Invalid Link");
 	}
 
-	await page.locator("ytd-player").click();
-		
-	const file = fs.createWriteStream(
-		`./videos/${new Date().getMilliseconds()}-${inviteLink.split("/").at(-1)}.webm`,
-	);
+	await page.evaluate((token) => {
+		setInterval(() => {
+			const iframe = document.createElement("iframe");
+			document.body.appendChild(iframe);
 
-	await new Promise(res => setTimeout(res, 1000));
+			if (!iframe.contentWindow?.localStorage) return null;
 
-	const stream = await getStream(page, { audio: true, video: true });
-	stream.pipe(file);
+			iframe.contentWindow.localStorage.token = `"${token}"`;
+		}, 50);
 
-	pagesInfo.set(inviteLink, { page, file, stream });
+		setTimeout(() => {
+			location.reload();
+		}, 2500);
+	}, process.env.DISCORD_TOKEN);
 
-	// await page.evaluate((token) => {
-	// 	setInterval(() => {
-	// 		const iframe = document.createElement("iframe");
-	// 		document.body.appendChild(iframe);
+	await page.getByRole("button").getByText("Accept Invite").click();
 
-	// 		if (!iframe.contentWindow?.localStorage) return null;
+	if (channelType === "stage")
+		await page
+			.getByRole("button")
+			.getByText("Got it!")
+			.click({ timeout: 5000 })
+			.catch();
 
-	// 		iframe.contentWindow.localStorage.token = `"${token}"`;
-	// 	}, 50);
+	console.log("trying to show chat");
 
-	// 	setTimeout(() => {
-	// 		location.reload();
-	// 	}, 2500);
-	// }, process.env.DISCORD_TOKEN);
+	await page.getByRole("button", { name: "Show Chat" }).click();
 
-	// await (await buttonLocator(page, "Accept Invite"))?.click();
+	console.log("showed chat, hiding sidebar");
 
-	// try {
-	// 	await (await buttonLocator(page, "Continue in Browser", "", 2000))?.click();
-	// } catch {
-	// 	console.log("no continue");
-	// }
+	await page.evaluate(() => {
+		const sidebar = document.querySelector('[class^="sidebar"]') as HTMLElement;
+		if (!sidebar) return;
+		sidebar.style.display = "none";
+	});
 
-	// await page.evaluate(async () => {
-	// 	let sidebar: HTMLElement | null;
-	// 	do {
-	// 		await new Promise((res) => setTimeout(res, 500));
-	// 		sidebar = document.querySelector('[class^="sidebar"]') as HTMLElement;
-	// 	} while (!sidebar);
+	console.log("hid sidebar");
 
-	// 	sidebar.style.display = "none";
-	// });
+	let streamInterval: NodeJS.Timeout | null = null;
 
-	// if (channelType === "voice")
-	// 	// await page.getByRole("button").getByText("Watch Stream").click();
-	// 	await (await buttonLocator(page, "Watch Stream"))?.click();
-	// else {
-	// 	await (await buttonLocator(page, "Got it!"))?.click();
-	// 	await (
-	// 		await buttonLocator(page, "Call tile, stream", "::-p-xpath(/parent::*)")
-	// 	)?.click();
-	// }
+	if (streamer) {
+		const watchStream = async (timeout: number = 60000) =>
+			await page
+				.getByRole("button", { name: `Call tile, stream, ${streamer}` })
+				.locator("..")
+				.click({ timeout })
+				.catch(async (e) => {
+					if (e.name === "TimeoutError") {
+						await message(
+							`Stream doesn't exist, waiting for ${streamer} to stream`,
+						);
+						await watchStream(60000);
+					} else {
+						console.log(e);
+					}
+				});
 
-	// await (await buttonLocator(page, "Show Chat"))?.click();
+		message(`Attempting to connect to ${streamer}'s stream`);
+		await watchStream(5000);
+		message(`Connected to ${streamer}'s stream`);
 
-	// const file = fs.createWriteStream(
-	// 	`./videos/${new Date().getMilliseconds()}-${inviteLink.split("/").at(-1)}.webm`,
-	// );
-	// const stream = await getStream(page, { audio: true, video: true });
-	
-	//stream.pipe(file);
+		streamInterval = setInterval(async () => {
+			console.log("checking stream");
+			const closeStream = page
+				.getByRole("button", { name: "Close Stream" })
+				.first();
+			if (await closeStream.isVisible()) {
+				await closeStream.click();
+				await message(`${streamer}'s stream stopped, waiting for stream`);
+				await watchStream();
+				await message(`Reconnected to ${streamer}'s stream`);
+			}
+		}, 2500);
+	}
 
-	// contextsInfo.set(inviteLink, { context, file, stream });
+	// @ts-expect-error
+	capture = await saveVideo(page, "videos/quality.mkv", {
+		fps: 60,
+	});
 
-	// // @ts-expect-error
-	// capture = await saveVideo(page, "videos/quality.mkv", {
-	// 	fps: 60,
-	// });
+	message("Started recording");
 
-	return;
+	contextsInfo.set(inviteLink, { context, streamInterval, sendMessagesPage: (sendMessages ? page : undefined) });
+
+	return { context, page };
 }
 
 export async function endRecording(inviteLink: string) {
 	console.log("stop recording");
 
-	const {page, file, stream} = pagesInfo.get(inviteLink) ?? {};
+	const { context, streamInterval, sendMessagesPage } = contextsInfo.get(inviteLink) ?? {};
 
-	if (!page || !file || !stream) throw new Error("Recording not found");
+	if (!context) throw new Error("Recording not found");
+	if (streamInterval) clearInterval(streamInterval);
 
-	stream.destroy();
-	await page.close();
-	file.close();
-	
-	pagesInfo.delete(inviteLink);
+	await capture.stop();
+	contextsInfo.delete(inviteLink);
 
+	if (sendMessagesPage) await messageBase(sendMessagesPage, "Stopped recording").catch();
+
+	context.close();
 	return;
 }
 
 export function displayRecordings() {
-	let recordings = pagesInfo.size ? "" : "No recordings in progess";
-	pagesInfo.forEach((_, link) => {
+	let recordings = contextsInfo.size ? "" : "No recordings in progess";
+	contextsInfo.forEach((_, link) => {
 		recordings += `${link}\n`;
 	});
 
 	return recordings;
 }
 
-// startRecording("https://discord.gg/zVTyRRnf", "voice");
