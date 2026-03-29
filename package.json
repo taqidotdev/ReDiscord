@@ -1,6 +1,7 @@
 {
   "dependencies": {
     "@types/express": "^5.0.6",
+    "application-loopback": "^1.2.7",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "patchright": "^1.58.2",

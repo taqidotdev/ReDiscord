@@ -1,23 +1,27 @@
 import fs from "node:fs";
 import { type BrowserContext, chromium, type Page } from "patchright";
+import { type PageVideoCapture, saveVideo } from "playwright-video";
+import { startAudioCapture, stopAudioCapture } from "application-loopback";
 import "dotenv/config";
+import {
+	type ChildProcessWithoutNullStreams,
+	execSync,
+	spawn,
+} from "node:child_process";
 
 if (!process.env.DISCORD_TOKEN) throw new Error("DISCORD_TOKEN not specified");
 
-const browser = await chromium.launch({
-	headless: false,
-	args: [
-		"--disable-features=WebRtcHideLocalIpsWithMdns",
-		"--use-fake-ui-for-media-stream",
-		"--enable-usermedia-screen-capturing",
-	],
-	ignoreDefaultArgs: ["--mute-audio"],
-});
 const contextsInfo: Map<
 	string,
 	{
 		context: BrowserContext;
 		page: Page;
+		recording: {
+			capture: PageVideoCapture;
+			audioCapture: ChildProcessWithoutNullStreams;
+			recordingPath: string;
+			pid: string;
+		};
 		sendMessages?: boolean;
 	}
 > = new Map();
@@ -32,6 +36,30 @@ async function messageBase(page: Page, message: string) {
 	}
 }
 
+async function calculateSync(
+	videoPath: string,
+	audioPath: string,
+): Promise<string> {
+	const audioResult = execSync(
+		`ffmpeg -t 10 -i "${audioPath}" -af "bandpass=f=12500:width_type=h:w=5000,astats=metadata=1:reset=1" -f null -`,
+		{ stdio: "pipe" },
+	).toString();
+
+	const audioMatches = [...audioResult.matchAll(/pkt_pts_time: (\d+\.\d+)/g)];
+	const beepTimestamp =
+		audioMatches.length > 0 ? parseFloat(audioMatches[0][1]) : 0;
+
+	const videoResult = execSync(
+		`ffmpeg -t 10 -i "${videoPath}" -vf "showinfo" -f null - 2>&1`,
+		{ stdio: "pipe" },
+	).toString();
+	const videoMatches = [...videoResult.matchAll(/pkt_pts_time: (\d+\.\d+)/g)];
+	const flashTimestamp =
+		videoMatches.length > 0 ? parseFloat(videoMatches[0][1]) : 0;
+
+	return (beepTimestamp - flashTimestamp).toFixed(3).toString();
+}
+
 export async function startRecording(
 	inviteLink: string,
 	channelType: "voice" | "stage",
@@ -39,6 +67,17 @@ export async function startRecording(
 	streamer?: string,
 	fileName?: string,
 ) {
+	const browserServer = await chromium.launchServer({
+		headless: false,
+		ignoreDefaultArgs: ["--mute-audio"],
+	});
+
+	const pid = browserServer.process().pid?.toString();
+
+	if (!pid) throw new Error("Process ID could not be found");
+
+	const browser = await chromium.connect(browserServer.wsEndpoint());
+
 	const context = await browser.newContext({
 		viewport: {
 			width: 1920,
@@ -101,6 +140,13 @@ export async function startRecording(
 				.click({ timeout: 5000 })
 				.catch();
 
+		// console.log("setting audio output");
+
+		// await page.getByRole("button", {name: "User Settings"}).click();
+		// await page.locator('[data-nav-anchor-key="voice_speakers_output_select"]').getByRole("button").click();
+		// await page.getByRole("option", {name: `Voicemeeter In ${contextsInfo.size + 1}`}).click();
+		// await page.getByRole("button", {name: "close"}).click();
+
 		console.log("trying to show chat");
 
 		await page.getByRole("button", { name: "Show Chat" }).click();
@@ -119,17 +165,22 @@ export async function startRecording(
 
 		if (streamer) {
 			const handleStreamClose = () => {
-				const closeStreamButton = page
-					.getByRole("button", { name: "Close Stream" })
-					.first();
-				console.log("handling stream");
-				closeStreamButton.waitFor().then(async () => {
-					console.log("stream closed");
-					await closeStreamButton.click();
-					console.log("close stream button clicked");
-					await watchStream();
-					console.log("watching for stream");
-				});
+				try {
+					const closeStreamButton = page
+						.getByRole("button", { name: "Close Stream" })
+						.first();
+					console.log("handling stream");
+					closeStreamButton.waitFor().then(async () => {
+						try {
+							console.log("stream closed");
+							message("Stream closed, attempting to reconnect");
+							await closeStreamButton.click();
+							console.log("close stream button clicked");
+							await watchStream();
+							console.log("watching for stream");
+						} catch {}
+					});
+				} catch {}
 			};
 
 			const watchStream: (
@@ -150,8 +201,6 @@ export async function startRecording(
 							`Stream doesn't exist, waiting for ${streamer} to stream`,
 						);
 						if (recursive) await watchStream();
-					} else {
-						console.log(e);
 					}
 				}
 			};
@@ -160,47 +209,75 @@ export async function startRecording(
 			await watchStream(5000);
 		}
 
-		fs.mkdirSync("./videos", { recursive: true });
-		const writeStream = fs.createWriteStream(
-			`./videos/${`${fileName ?? `${inviteLink.split("/").at(-1)}-${Date.now()}`}`}.webm`,
-			{ flags: "a" },
+		const recordingFilePath = `./raw/${fileName ?? `${inviteLink.split("/").at(-1)}-${Date.now()}`}`;
+
+		fs.mkdirSync("./raw", { recursive: true });
+		fs.mkdirSync("./recordings", { recursive: true });
+
+		const capture = await saveVideo(
+			// @ts-expect-error
+			page,
+			`${recordingFilePath}.mp4`,
 		);
 
-		await page.exposeFunction("write", (bufferData: number[]) => {
-			writeStream.write(Buffer.from(bufferData));
+		const audioCapture = spawn("ffmpeg", [
+			"-y",
+			"-use_wallclock_as_timestamps", "1",
+			"-f", "s16le", 
+			"-ar", "48000", 
+			"-ac", "2",
+			"-i", "pipe:0",
+			"-af", "aresample=async=1:min_hard_comp=0.100000,asetpts=PTS-STARTPTS",
+			"-c:a", "aac",
+			"-q:a", "2",
+			`${recordingFilePath}.m4a`,
+		]);
+
+		let chunkReceived: null | (() => void);
+		const audioStarted = new Promise<void>(res => chunkReceived = res); 
+
+		startAudioCapture(pid, {
+			onData: (chunk) => {
+				try {
+					audioCapture.stdin.write(chunk);
+					if(chunkReceived) {
+						chunkReceived();
+						chunkReceived = null;
+					}
+				} catch {}
+			},
 		});
-		await page.exposeFunction("end", writeStream.end.bind(writeStream));
 
+		await audioStarted;
+
+		// stuff to sync video nd audio
 		await page.evaluate(async () => {
-			navigator.mediaDevices
-				.getDisplayMedia({
-					video: true,
-					audio: {
-						// @ts-expect-error
-						chromeMediaSource: "tab",
-					},
-					preferCurrentTab: true,
-				})
-				.then((mediaStream) => {
-					const recorderWindow = window as unknown as Window & {
-						_recorder: MediaRecorder;
-						write: (data: number[]) => boolean;
-						end: () => void;
-					};
-					recorderWindow._recorder = new MediaRecorder(mediaStream, {
-						mimeType: "video/webm;codecs=vp9,opus",
-					});
+			await new Promise<void>((res) => {
+				const audioContext = new window.AudioContext();
+				const oscillator = audioContext.createOscillator();
+				const gain = audioContext.createGain();
+				gain.gain.value = 0.4;
 
-					recorderWindow._recorder.ondataavailable = async (blobChunk) => {
-						const buffer = await blobChunk.data.arrayBuffer();
-						recorderWindow.write(Array.from(new Uint8Array(buffer)));
-					};
-					recorderWindow._recorder.onstop = () => {
-						recorderWindow.end();
-					};
+				oscillator.connect(gain);
+				gain.connect(audioContext.destination);
 
-					recorderWindow._recorder.start(1000);
-				});
+				const now = audioContext.currentTime;
+				oscillator.frequency.setValueAtTime(10000, now);
+				oscillator.frequency.linearRampToValueAtTime(10000, now + 0.5);
+
+				const flash = document.createElement("div");
+				flash.style.cssText =
+					"position:fixed;inset:0;background:white;z-index:999999;";
+				document.body.appendChild(flash);
+
+				oscillator.start(now);
+				oscillator.stop(now + 0.5);
+
+				setTimeout(() => {
+					flash.remove();
+					res();
+				}, 500);
+			});
 		});
 
 		message("Started recording");
@@ -208,10 +285,16 @@ export async function startRecording(
 		contextsInfo.set(inviteLink, {
 			context,
 			page,
+			recording: {
+				capture,
+				audioCapture,
+				recordingPath: recordingFilePath,
+				pid,
+			},
 			sendMessages,
 		});
 	} catch (e) {
-		await context.close();
+		await browserServer.close();
 		throw e;
 	}
 
@@ -221,22 +304,50 @@ export async function startRecording(
 export async function endRecording(inviteLink: string) {
 	console.log("stop recording");
 
-	const { context, page, sendMessages } = contextsInfo.get(inviteLink) ?? {};
+	const { context, page, recording, sendMessages } =
+		contextsInfo.get(inviteLink) ?? {};
 
-	if (!context) throw new Error("Recording not found");
+	if (!context || !recording) throw new Error("Recording not found");
 	if (!page) throw new Error("Page not found");
 
-	await page.evaluate(() => {
-		const recorderWindow = window as unknown as Window & {
-			_recorder: MediaRecorder;
-			write: (data: number[]) => boolean;
-			end: () => void;
-		};
-		recorderWindow._recorder.stop();
-	});
+	await recording.capture.stop();
+	stopAudioCapture(recording.pid);
+	recording.audioCapture.stdin.end();
+
+	await new Promise((res) => recording.audioCapture.on("close", res));
+
+	console.log(
+		await calculateSync(
+			`${recording.recordingPath}.mp4`,
+			`${recording.recordingPath}.m4a`,
+		),
+	);
+
+	const mergeFiles = spawn("ffmpeg", [
+		"-y",
+		"-i",
+		`${recording.recordingPath}.mp4`,
+		"-itsoffset",
+		await calculateSync(
+			`${recording.recordingPath}.mp4`,
+			`${recording.recordingPath}.m4a`,
+		),
+		"-i",
+		`${recording.recordingPath}.m4a`,
+		"-c:v",
+		"copy",
+		"-c:a",
+		"copy",
+		"-map",
+		"0:v:0",
+		"-map",
+		"1:a:0",
+		`./recordings/${recording.recordingPath.split("/").at(-1)}.mp4`,
+	]);
+
+	await new Promise((res) => mergeFiles.on("close", res));
 
 	contextsInfo.delete(inviteLink);
-
 	if (sendMessages) await messageBase(page, "Stopped recording").catch();
 
 	await context.close();
@@ -252,3 +363,8 @@ export function displayRecordings() {
 
 	return recordings;
 }
+
+await startRecording("https://discord.gg/TJYUAuTR", "voice", true, "iqat");
+new Promise((r) => setTimeout(r, 10000)).then(() =>
+	endRecording("https://discord.gg/TJYUAuTR"),
+);
