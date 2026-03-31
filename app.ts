@@ -1,4 +1,6 @@
+import fs from "node:fs"
 import express from "express";
+import "dotenv/config"
 import { displayRecordings, endRecording, startRecording } from "./handlers.ts";
 
 const app = express();
@@ -6,7 +8,7 @@ const app = express();
 app.use(express.json());
 
 app.get("/", async (_req, res) => {
-	res.status(200).send(displayRecordings());
+	res.status(200).send({response: displayRecordings()});
 });
 
 app.post("/", async (req, res) => {
@@ -70,6 +72,7 @@ app.delete("/", async (req, res) => {
 	res.status(200).send("Recording stopped");
 });
 
-app.listen(3000, () => {
-	console.log("listening");
+app.listen(process.env.PORT, () => {
 });
+
+fs.writeFileSync(".pid", process.pid.toString());

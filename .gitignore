@@ -6,4 +6,5 @@ raw/
 raw recordings/
 recordings
 
-test.cjs
+test.ts
+*.mp4
