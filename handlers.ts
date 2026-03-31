@@ -31,7 +31,7 @@ const contextsInfo: Map<
 			pid: string;
 		};
 		sendMessages?: boolean;
-		breakStartRecording?: boolean;
+		breakStartRecording: () => void;
 	}
 > = new Map();
 
@@ -66,7 +66,7 @@ async function calculateOffset(
 			"null",
 			"-",
 		],
-		{ encoding: "utf8" },
+		{ encoding: "utf8", windowsHide: true },
 	);
 
 	const audioResultLines = audioResult.stdout.split("\n");
@@ -101,7 +101,7 @@ async function calculateOffset(
 			"null",
 			"-",
 		],
-		{ encoding: "utf8" },
+		{ encoding: "utf8", windowsHide: true },
 	);
 
 	const videoMatch = videoResult.stderr.match(/t:(\d+\.\d+)/);
@@ -125,28 +125,36 @@ async function calculateRatio(
 ) {
 	const videoLength =
 		parseFloat(
-			spawnSync("ffprobe", [
-				"-v",
-				"error",
-				"-show_entries",
-				"format=duration",
-				"-of",
-				"default=noprint_wrappers=1:nokey=1",
-				videoPath,
-			]).stdout.toString(),
+			spawnSync(
+				"ffprobe",
+				[
+					"-v",
+					"error",
+					"-show_entries",
+					"format=duration",
+					"-of",
+					"default=noprint_wrappers=1:nokey=1",
+					videoPath,
+				],
+				{ windowsHide: true },
+			).stdout.toString(),
 		) - flashTimestamp;
 
 	const audioLength =
 		parseFloat(
-			spawnSync("ffprobe", [
-				"-v",
-				"error",
-				"-show_entries",
-				"format=duration",
-				"-of",
-				"default=noprint_wrappers=1:nokey=1",
-				audioPath,
-			]).stdout.toString(),
+			spawnSync(
+				"ffprobe",
+				[
+					"-v",
+					"error",
+					"-show_entries",
+					"format=duration",
+					"-of",
+					"default=noprint_wrappers=1:nokey=1",
+					audioPath,
+				],
+				{ windowsHide: true },
+			).stdout.toString(),
 		) - beepTimestamp;
 
 	console.log((audioLength / videoLength).toFixed(6));
@@ -154,36 +162,52 @@ async function calculateRatio(
 	return (audioLength / videoLength).toFixed(6);
 }
 
-async function mergeFiles(videoPath: string, audioPath: string): Promise<void> {
+export async function mergeFiles(
+	videoPath: string,
+	audioPath: string,
+	outputPath?: string,
+): Promise<string> {
 	const { offset, beepTimestamp, flashTimestamp } = await calculateOffset(
 		videoPath,
 		audioPath,
 	);
 
-	spawnSync("ffmpeg", [
-		"-y",
-		"-i",
-		videoPath,
-		"-itsoffset",
-		offset,
-		"-i",
-		audioPath,
-		"-ss",
-		"5",
-		"-filter:v",
-		`setpts=${await calculateRatio(videoPath, audioPath, beepTimestamp, flashTimestamp)}*PTS`,
-		"-c:v",
-		"libx264",
-		"-c:a",
-		"copy",
-		"-map",
-		"0:v:0",
-		"-map",
-		"1:a:0",
-		`./recordings/${videoPath.split("/").at(-1) ?? videoPath.split("/").at(-2)}`,
-	]);
+	const filePath =
+		outputPath ??
+		`./recordings/${videoPath.split("/").at(-1) ?? videoPath.split("/").at(-2)}`;
+
+	console.log(beepTimestamp);
+	console.log(flashTimestamp);
+
+	spawnSync(
+		"ffmpeg",
+		[
+			"-y",
+			"-i",
+			videoPath,
+			"-itsoffset",
+			offset,
+			"-i",
+			audioPath,
+			"-ss",
+			"5",
+			"-filter:v",
+			`setpts=${await calculateRatio(videoPath, audioPath, beepTimestamp, flashTimestamp)}*PTS`,
+			"-c:v",
+			"libx264",
+			"-c:a",
+			"copy",
+			"-map",
+			"0:v:0",
+			"-map",
+			"1:a:0",
+			filePath,
+		],
+		{ windowsHide: true },
+	);
 
 	console.log("merged");
+	return filePath;
 }
 
 export async function startRecording(
@@ -193,8 +217,10 @@ export async function startRecording(
 	streamer?: string,
 	fileName?: string,
 ) {
+	console.log([inviteLink, channelType, sendMessages, streamer, fileName]);
 	const browserServer = await chromium.launchServer({
 		ignoreDefaultArgs: ["--mute-audio"],
+		headless: false,
 	});
 
 	const pid = browserServer.process().pid?.toString();
@@ -211,12 +237,10 @@ export async function startRecording(
 		reducedMotion: "reduce",
 	});
 
-	contextsInfo.set(inviteLink, { breakStartRecording: false });
-
 	try {
-		new Promise<void>((res) => {
-			if (contextsInfo.get(inviteLink)?.breakStartRecording) res();
-		}).then(() => {
+		new Promise<void>((res) =>
+			contextsInfo.set(inviteLink, { breakStartRecording: res }),
+		).then(() => {
 			throw new Error("Recording manually interrupted");
 		});
 
@@ -363,26 +387,30 @@ export async function startRecording(
 
 		console.log("video started");
 
-		const audioCapture = spawn("ffmpeg", [
-			"-y",
-			"-use_wallclock_as_timestamps",
-			"1",
-			"-f",
-			"s16le",
-			"-ar",
-			"48000",
-			"-ac",
-			"2",
-			"-i",
-			"pipe:0",
-			"-af",
-			"aresample=async=1:min_hard_comp=0.100000,asetpts=PTS-STARTPTS",
-			"-c:a",
-			"aac",
-			"-q:a",
-			"2",
-			`${recordingFilePath}.m4a`,
-		]);
+		const audioCapture = spawn(
+			"ffmpeg",
+			[
+				"-y",
+				"-use_wallclock_as_timestamps",
+				"1",
+				"-f",
+				"s16le",
+				"-ar",
+				"48000",
+				"-ac",
+				"2",
+				"-i",
+				"pipe:0",
+				"-af",
+				"aresample=async=1:min_hard_comp=0.100000,asetpts=PTS-STARTPTS",
+				"-c:a",
+				"aac",
+				"-q:a",
+				"2",
+				`${recordingFilePath}.m4a`,
+			],
+			{ windowsHide: true },
+		);
 
 		let chunkReceived: null | (() => void);
 		const audioStarted = new Promise<void>((res) => (chunkReceived = res));
@@ -416,6 +444,7 @@ export async function startRecording(
 		});
 
 		await audioStarted;
+		await page.waitForTimeout(1500);
 
 		console.log("audio started");
 
@@ -460,9 +489,13 @@ export async function startRecording(
 				pid,
 			},
 			sendMessages,
+			breakStartRecording: () => {
+				return "recording already started";
+			},
 		});
 	} catch (e) {
 		await browserServer.close();
+		console.log(e);
 		throw e;
 	}
 
@@ -513,7 +546,7 @@ export function interruptRecording(inviteLink: string) {
 				? `${inviteLink}/`
 				: inviteLink.slice(0, inviteLink.lastIndexOf("/")),
 		);
-	if (context) context.breakStartRecording = true;
+	if (context) context.breakStartRecording();
 }
 
 export function displayRecordings() {
@@ -563,3 +596,7 @@ export async function test() {
 
 	return;
 }
+
+// await startRecording("https://discord.gg/TJYUAuTR", "voice", true);
+// await new Promise<void>((res) => setTimeout(res, 10 * 1000));
+// await endRecording("https://discord.gg/TJYUAuTR");

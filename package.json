@@ -1,7 +1,9 @@
 {
+  "name": "rediscord",
   "dependencies": {
     "@types/express": "^5.0.6",
     "application-loopback": "^1.2.7",
+    "commander": "^14.0.3",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "patchright": "^1.58.2",
@@ -15,5 +17,8 @@
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@types/node": "^25.5.0",
     "playwright-video": "2.4.0"
+  },
+  "bin": {
+    "rediscord": "./index.js"
   }
 }
