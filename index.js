@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import fs, { readFileSync } from "node:fs";
-import { request } from "node:http";
 import "dotenv/config";
 import { Command } from "commander";
 import { mergeFiles, test } from "./handlers.ts";
@@ -51,25 +50,28 @@ program
 			} catch {}
 		}
 
-		spawn("node", ["app.ts"], {
+		spawn("npx", ["ts-node", "app.ts"], {
 			stdio: "inherit",
 			detached: true,
+			shell: process.platform === "win32",
 		}).unref();
 
-		let pid;
-		await new Promise((res) => setTimeout(res, 1500));
-		try {
-			pid = readFileSync(".pid", "utf-8");
-		} catch {
-			await new Promise((res) => setTimeout(res, 3500));
+		let i = 0;
+
+		for (; i < 30; i++) {
 			try {
-				pid = readFileSync(".pid", "utf-8");
-			} catch {
-				console.error("server failed to start (could not find pid)");
-			}
+				await fetch(`http://localhost:${process.env.PORT}`);
+				break;
+			} catch {}
+			await new Promise((res) => setTimeout(res, 500));
 		}
 
-		console.log(`server started at port ${process.env.PORT} (PID: ${pid})`);
+		if (i === 30) {
+			console.error("server failed to start");
+		} else {
+			const pid = readFileSync(".pid", "utf-8");
+			console.log(`server started at port ${process.env.PORT} (PID: ${pid})`);
+		}
 
 		return;
 	});
@@ -116,66 +118,88 @@ program
 	});
 
 program
-	.command("start-recording <channelType> <channelInviteLink>")
+	.command("start-recording <channelInviteLink>")
 	.description(
-		`start recording a voice/stage channel (channelType: "voice" or "stage", channelInviteLink: "https://discord.gg/{code thingy})`,
+		`start recording a voice/stage channel (channelInviteLink: "https://discord.gg/{code thingy})`,
 	)
 	.option(
 		"-m, --send-messages",
-		"whether or not to send messages in the channel's chat",
+		"whether or not to send messages in the channel's chat (this'll prolly get your account banned)",
 		false,
 	)
 	.option(
-		"-s, --streamer",
+		"-s, --streamer <streamer>",
 		"person to watch the stream of, leave blank to not watch a stream",
 	)
 	.option(
 		"-f, --file-name <fileName>",
-		"name of the recording's file, leave blank to be assigned automatically",
+		"name of the recording's file (no extension, myVideo NOT myVideo.mp4), leave blank to be assigned automatically",
 	)
-	.action(async (channelType, channelInviteLink, options) => {
-		const pingResponse = await fetch(`http://localhost:${process.env.PORT}`, {
-			signal: AbortSignal.timeout(3000),
-		});
-		if (!pingResponse.ok) {
-			console.error("server is not up, run start-server first");
-			return;
-		}
+	.option(
+		"-d, --debug",
+		"enables debug mode (opens headed chrome instead of headless, press cancel if it asks to open discord app)",
+		false,
+	)
+	.option(
+		"--delete-sidebar",
+		"deletes the entire sidebar instead of just the guilds tab",
+		false,
+	)
+	.action(
+		async (
+			channelInviteLink,
+			{ debug, deleteSidebar, sendMessages, streamer, fileName },
+		) => {
+			const data = JSON.stringify({
+				channelInviteLink,
+				debug,
+				deleteSidebar,
+				sendMessages,
+				streamer,
+				fileName,
+			});
 
+			console.log(debug);
+			console.log(sendMessages);
+
+			try {
+				const res = await (
+					await fetch(`http://localhost:${process.env.PORT}`, {
+						method: "POST",
+						body: data,
+						headers: { "Content-Type": "application/json" },
+					})
+				).text();
+
+				console.log(res);
+			} catch (e) {
+				if (e.message === "fetch failed")
+					console.error("server is not up, run start-server first");
+				else console.error(`error occurred: ${e.message}`);
+				return;
+			}
+		},
+	);
+
+program
+	.command("interrupt-recording <channelInviteLink>")
+	.description(
+		"runs this while the recording has not started to exit without starting recording",
+	)
+	.action(async (channelInviteLink) => {
 		const data = JSON.stringify({
 			channelInviteLink,
-			channelType,
-			sendMessages: options.sendMessages,
-			streamer: options.streamer,
-			fileName: options.fileName,
 		});
 
-		const req = request(
-			{
-				hostname: "localhost",
-				port: process.env.PORT,
-				path: "/",
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"Content-Length": data.length,
-				},
-			},
-			(res) => {
-				let resData = "";
+		const res = await (
+			await fetch(`http://localhost:${process.env.PORT}/interrupt`, {
+				method: "DELETE",
+				body: data,
+				headers: { "Content-Type": "application/json" },
+			})
+		).text();
 
-				res.on("data", (chunk) => (resData += chunk));
-				res.on("close", () => {
-					console.log("asihgfhaohg");
-					console.log(resData);
-				});
-			},
-		);
-
-		req.on("error", (e) => console.error(e));
-
-		req.write(data);
-		req.end();
+		console.log(res);
 	});
 
 program
@@ -183,9 +207,11 @@ program
 	.action(async (channelInviteLink) => {
 		let recordings;
 		try {
-			recordings = await fetch(`http://localhost:${process.env.PORT}`, {
-				signal: AbortSignal.timeout(3000),
-			});
+			recordings = await (
+				await fetch(`http://localhost:${process.env.PORT}`, {
+					signal: AbortSignal.timeout(3000),
+				})
+			).text();
 		} catch {
 			console.error("start the server via start-server first");
 			return;
@@ -196,7 +222,9 @@ program
 			return;
 		}
 
-		if (!channelInviteLink || !recordings.includes(channelInviteLink)) {
+		console.log(recordings);
+
+		if (!channelInviteLink || !recordings?.includes(channelInviteLink)) {
 			console.error(
 				`ensure you entered the correct invite link used, list: ${recordings}`,
 			);
@@ -205,37 +233,16 @@ program
 
 		const data = JSON.stringify({
 			channelInviteLink,
-			channelType,
-			sendMessages: options.sendMessages,
-			streamer: options.streamer,
-			fileName: options.fileName,
 		});
 
-		const req = request(
-			{
-				hostname: "localhost",
-				port: process.env.PORT,
-				path: "/",
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"Content-Length": data.length,
-				},
-			},
-			(res) => {
-				let resData = "";
-
-				res.on("data", (chunk) => (resData += chunk));
-				res.on("close", () => {
-					console.log(resData);
-				});
-			},
-		);
-
-		req.on("error", (e) => console.error(e));
-
-		req.write(data);
-		req.end();
+		const res = await (
+			await fetch(`http://localhost:${process.env.PORT}`, {
+				method: "DELETE",
+				body: data,
+				headers: { "Content-Type": "application/json" },
+			})
+		).text();
+		console.log(res);
 	});
 
 program
@@ -246,7 +253,7 @@ program
 			const res = await fetch(`http://localhost:${process.env.PORT}`, {
 				AbortSignal: AbortSignal.timeout(3000),
 			});
-			console.log((await res.json()).response);
+			console.log(await res.text());
 		} catch (e) {
 			console.error(
 				`error: ${e.message}\nensure you started the server via start-server first`,
