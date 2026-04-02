@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import fs, { existsSync } from "node:fs";
 import {
 	type BrowserServer,
 	chromium,
@@ -105,18 +105,16 @@ async function calculateOffset(
 	};
 }
 
-async function calculateRatio(videoLength: number, audioLength: number) {
-	console.log(`${videoLength}, ${audioLength}`);
-	console.log((audioLength / videoLength).toFixed(6));
-
-	return (audioLength / videoLength).toFixed(6);
-}
-
 export async function mergeFiles(
 	videoPath: string,
 	audioPath: string,
+	encodingPreset: string = "ultrafast",
 	outputPath?: string,
 ): Promise<string> {
+	if (!existsSync(videoPath) || !existsSync(audioPath)) {
+		throw new Error("raw video/audio files not found");
+	}
+
 	const audioLength = parseFloat(
 		spawnSync(ffprobePath, [
 			"-v",
@@ -165,6 +163,7 @@ export async function mergeFiles(
 
 	for (let i = 0; i < 50; i++) {
 		videoLength = getVideoLength();
+		console.log(videoLength);
 		if (!videoLength || Number.isNaN(videoLength) || videoLength <= 0) {
 			await new Promise<void>((res) => setTimeout(res, 2000));
 			continue;
@@ -190,340 +189,350 @@ export async function mergeFiles(
 	console.log(beepTimestamp);
 	console.log(flashTimestamp);
 
-	const ratio = await calculateRatio(
-		videoLength - flashTimestamp,
-		audioLength - beepTimestamp,
-	);
+	console.log(`${videoLength}, ${audioLength}`);
 
-	spawnSync(ffmpegPath, [
-		"-y",
-		"-i",
-		videoPath,
-		"-itsoffset",
-		offset,
-		"-i",
-		audioPath,
-		"-ss",
-		"5",
-		"-filter:v",
-		`setpts=${ratio}*PTS`,
-		"-c:v",
-		"libx264",
-		"-c:a",
-		"aac",
-		"-map",
-		"0:v:0",
-		"-map",
-		"1:a:0",
-		filePath,
-	]);
+	const ratio = (
+		(audioLength - beepTimestamp) /
+		(videoLength - flashTimestamp)
+	).toFixed(6);
+
+	console.log(ratio);
+
+	spawnSync(
+		ffmpegPath,
+		[
+			"-y",
+			"-i",
+			videoPath,
+			"-itsoffset",
+			offset,
+			"-i",
+			audioPath,
+			// "-ss",
+			// "5",
+			"-filter:v",
+			`setpts=${ratio}*PTS`,
+			"-c:v",
+			"libx264",
+			"-preset",
+			`${encodingPreset}`,
+			"-c:a",
+			"copy",
+			"-map",
+			"0:v:0",
+			"-map",
+			"1:a:0",
+			filePath,
+		],
+		{ stdio: "inherit" },
+	);
 
 	console.log("merged");
 	return filePath;
 }
 
 export async function startRecording(
-		inviteLink: string,
-		debug: boolean = false,
-		deleteEntireSidebar: boolean = false,
-		sendMessages?: boolean,
-		streamer?: string,
-		fileName?: string,
-	) {
-		console.log([inviteLink, sendMessages, !debug, streamer, fileName]);
+	inviteLink: string,
+	debug: boolean = false,
+	deleteEntireSidebar: boolean = false,
+	sendMessages?: boolean,
+	streamer?: string,
+	fileName?: string,
+) {
+	console.log([inviteLink, sendMessages, !debug, streamer, fileName]);
 
-		if (
-			!inviteLink.match(
-				/https?:\/\/(?:discord\.gg|discord(?:app)?\.com\/invite)\/[^\s/]+\/?/,
-			)
-		) {
-			throw new Error("Invalid invite link");
+	if (
+		!inviteLink.match(
+			/https?:\/\/(?:discord\.gg|discord(?:app)?\.com\/invite)\/[^\s/]+\/?/,
+		)
+	) {
+		throw new Error("Invalid invite link");
+	}
+
+	const browserServer = await chromium.launchServer({
+		ignoreDefaultArgs: ["--mute-audio"],
+		headless: !debug,
+	});
+
+	const pid = browserServer.process().pid?.toString();
+
+	if (!pid) throw new Error("Process ID could not be found");
+
+	const browser = await chromium.connect(browserServer.wsEndpoint());
+
+	const context = await browser.newContext({
+		viewport: {
+			width: 1920,
+			height: 1080,
+		},
+		reducedMotion: "reduce",
+	});
+
+	let rejPromise = () => {};
+
+	try {
+		new Promise<void>((res, rej) => {
+			contextsInfo.set(inviteLink, { breakStartRecording: res });
+			rejPromise = rej;
+		})
+			.then(() => {
+				throw new Error("Recording manually interrupted");
+			})
+			.catch(() => {});
+
+		const page = await context.newPage();
+
+		const message = sendMessages
+			? (message: string) => messageBase(page, message)
+			: () => {};
+
+		const res = await page.goto(inviteLink);
+
+		if (!res?.ok()) {
+			throw new Error("Could not load page");
 		}
 
-		const browserServer = await chromium.launchServer({
-			ignoreDefaultArgs: ["--mute-audio"],
-			headless: !debug,
-		});
+		await page.evaluate((token) => {
+			const iframe = document.createElement("iframe");
+			document.body.appendChild(iframe);
 
-		const pid = browserServer.process().pid?.toString();
+			if (!iframe.contentWindow?.localStorage) return null;
 
-		if (!pid) throw new Error("Process ID could not be found");
+			iframe.contentWindow.localStorage.token = `"${token}"`;
 
-		const browser = await chromium.connect(browserServer.wsEndpoint());
+			document.body.removeChild(iframe);
 
-		const context = await browser.newContext({
-			viewport: {
-				width: 1920,
-				height: 1080,
-			},
-			reducedMotion: "reduce",
-		});
-
-		let rejPromise = () => {};
+			setTimeout(() => {
+				location.reload();
+			}, 2500);
+		}, process.env.DISCORD_TOKEN);
 
 		try {
-			new Promise<void>((res, rej) => {
-				contextsInfo.set(inviteLink, { breakStartRecording: res });
-				rejPromise = rej;
-			})
-				.then(() => {
-					throw new Error("Recording manually interrupted");
-				})
-				.catch(() => {});
+			await page
+				.getByRole("button")
+				.getByText("Accept Invite")
+				.click({ timeout: 15000 });
+		} catch {}
 
-			const page = await context.newPage();
+		const continueInBrowser = page.getByRole("button", {
+			name: "Continue in Browser",
+		});
 
-			const message = sendMessages
-				? (message: string) => messageBase(page, message)
-				: () => {};
-
-			const res = await page.goto(inviteLink);
-
-			if (!res?.ok()) {
-				throw new Error("Could not load page");
-			}
-
-			await page.evaluate((token) => {
-				const iframe = document.createElement("iframe");
-				document.body.appendChild(iframe);
-
-				if (!iframe.contentWindow?.localStorage) return null;
-
-				iframe.contentWindow.localStorage.token = `"${token}"`;
-
-				document.body.removeChild(iframe);
-
-				setTimeout(() => {
-					location.reload();
-				}, 2500);
-			}, process.env.DISCORD_TOKEN);
-
+		const clickContinuously = async (locator: Locator) => {
 			try {
-				await page
-					.getByRole("button")
-					.getByText("Accept Invite")
-					.click({ timeout: 15000 });
+				await locator.waitFor({ timeout: 30000 });
+				await locator.click();
+				clickContinuously(locator);
 			} catch {}
+		};
 
-			const continueInBrowser = page.getByRole("button", {
-				name: "Continue in Browser",
-			});
+		clickContinuously(continueInBrowser);
 
-			const clickContinuously = async (locator: Locator) => {
-				try {
-					await locator.waitFor({ timeout: 30000 });
-					await locator.click();
-					clickContinuously(locator);
-				} catch {}
+		const acceptAs = page.getByRole("button", { name: "Accept as " });
+		acceptAs
+			.waitFor()
+			.then(() => acceptAs.click())
+			.catch(() => {});
+
+		try {
+			await page
+				.getByRole("button")
+				.getByText("Got it")
+				.click({ timeout: 10000 });
+		} catch {}
+
+		console.log("trying to show chat");
+
+		await page.getByRole("button", { name: "Show Chat" }).click();
+
+		console.log("showed chat, hiding sidebar");
+
+		await (deleteEntireSidebar
+			? page.locator('[class^="sidebar"]')
+			: page.getByLabel("Servers sidebar")
+		).evaluate((node) => node.remove());
+
+		console.log("hid sidebar");
+
+		if (streamer) {
+			const handleStreamClose = () => {
+				const closeStreamButton = page
+					.getByRole("button", { name: "Close Stream" })
+					.first();
+				console.log("handling stream");
+				closeStreamButton
+					.waitFor({ timeout: 0 })
+					.then(async () => {
+						try {
+							console.log("stream closed");
+							message("Stream closed, attempting to reconnect");
+							await closeStreamButton.click();
+							console.log("close stream button clicked");
+							await watchStream();
+							console.log("watching for stream");
+						} catch {}
+					})
+					.catch((e) => console.error(e));
 			};
 
-			clickContinuously(continueInBrowser);
-
-			const acceptAs = page.getByRole("button", { name: "Accept as " });
-			acceptAs
-				.waitFor()
-				.then(() => acceptAs.click())
-				.catch(() => {});
-
-			try {
-				await page
-					.getByRole("button")
-					.getByText("Got it")
-					.click({ timeout: 10000 });
-			} catch {}
-
-			console.log("trying to show chat");
-
-			await page.getByRole("button", { name: "Show Chat" }).click();
-
-			console.log("showed chat, hiding sidebar");
-
-			await (deleteEntireSidebar
-				? page.locator('[class^="sidebar"]')
-				: page.getByLabel("Servers sidebar")
-			).evaluate((node) => node.remove());
-
-			console.log("hid sidebar");
-
-			if (streamer) {
-				const handleStreamClose = () => {
-					const closeStreamButton = page
-						.getByRole("button", { name: "Close Stream" })
-						.first();
-					console.log("handling stream");
-					closeStreamButton
-						.waitFor({ timeout: 0 })
-						.then(async () => {
-							try {
-								console.log("stream closed");
-								message("Stream closed, attempting to reconnect");
-								await closeStreamButton.click();
-								console.log("close stream button clicked");
-								await watchStream();
-								console.log("watching for stream");
-							} catch {}
-						})
-						.catch((e) => console.error(e));
-				};
-
-				const watchStream: (
-					timeout?: number,
-					recursive?: boolean,
-				) => Promise<void> = async (timeout = 60000, recursive = true) => {
-					try {
-						await page
-							.getByRole("button", { name: `Call tile, stream, ${streamer}` })
-							.locator("..")
-							.click({ timeout });
-						handleStreamClose();
-						message(`Connected to ${streamer}'s stream`);
-					} catch (e) {
-						if (!(e instanceof Error)) return;
-						if (e.name === "TimeoutError") {
-							await message(
-								`Stream doesn't exist, waiting for ${streamer} to stream`,
-							);
-							if (recursive) await watchStream();
-						}
+			const watchStream: (
+				timeout?: number,
+				recursive?: boolean,
+			) => Promise<void> = async (timeout = 60000, recursive = true) => {
+				try {
+					await page
+						.getByRole("button", { name: `Call tile, stream, ${streamer}` })
+						.locator("..")
+						.click({ timeout });
+					handleStreamClose();
+					message(`Connected to ${streamer}'s stream`);
+				} catch (e) {
+					if (!(e instanceof Error)) return;
+					if (e.name === "TimeoutError") {
+						await message(
+							`Stream doesn't exist, waiting for ${streamer} to stream`,
+						);
+						if (recursive) await watchStream();
 					}
-				};
+				}
+			};
 
-				message(`Attempting to connect to ${streamer}'s stream`);
-				await watchStream(5000);
-			}
+			message(`Attempting to connect to ${streamer}'s stream`);
+			await watchStream(5000);
+		}
 
-			const recordingFilePath = `./raw/${fileName ?? `${inviteLink.split("/").at(-1) ?? inviteLink.split("/").at(-2)}-${Date.now()}`}`;
+		const recordingFilePath = `./raw/${fileName ?? `${inviteLink.split("/").at(-1) ?? inviteLink.split("/").at(-2)}-${Date.now()}`}`;
 
-			console.log(recordingFilePath);
+		console.log(recordingFilePath);
 
-			fs.mkdirSync("./raw", { recursive: true });
-			fs.mkdirSync("./recordings", { recursive: true });
+		fs.mkdirSync("./raw", { recursive: true });
+		fs.mkdirSync("./recordings", { recursive: true });
 
-			const capture = await saveVideo(
-				// @ts-expect-error
-				page,
-				`${recordingFilePath}.mp4`,
-				{
-					fps: process.env.FPS,
-				},
-			);
+		const capture = await saveVideo(
+			// @ts-expect-error
+			page,
+			`${recordingFilePath}.mp4`,
+			{
+				fps: process.env.FPS,
+			},
+		);
 
-			console.log("video started");
+		console.log("video started");
 
-			const audioCapture = spawn(ffmpegPath, [
-				"-y",
-				"-use_wallclock_as_timestamps",
-				"1",
-				"-f",
-				"s16le",
-				"-ar",
-				"48000",
-				"-ac",
-				"2",
-				"-i",
-				"pipe:0",
-				"-af",
-				"aresample=async=1:min_hard_comp=0.100000,asetpts=PTS-STARTPTS",
-				"-c:a",
-				"aac",
-				"-g",
-				"585",
-				"-movflags",
-				"frag_keyframe+empty_moov+default_base_moof",
-				`${recordingFilePath}.m4a`,
-			]);
+		const audioCapture = spawn(ffmpegPath, [
+			"-y",
+			"-use_wallclock_as_timestamps",
+			"1",
+			"-f",
+			"s16le",
+			"-ar",
+			"48000",
+			"-ac",
+			"2",
+			"-i",
+			"pipe:0",
+			"-af",
+			"aresample=async=1:min_hard_comp=0.100000,asetpts=PTS-STARTPTS",
+			"-c:a",
+			"aac",
+			"-g",
+			"585",
+			"-movflags",
+			"frag_keyframe+empty_moov+default_base_moof",
+			`${recordingFilePath}.m4a`,
+		]);
 
-			let chunkReceived: null | (() => void);
-			const audioStarted = new Promise<void>((res) => (chunkReceived = res));
+		let chunkReceived: null | (() => void);
+		const audioStarted = new Promise<void>((res) => (chunkReceived = res));
 
-			startAudioCapture(pid, {
-				onData: (chunk) => {
-					try {
-						audioCapture.stdin.write(chunk);
-						if (chunkReceived) {
-							chunkReceived();
-							chunkReceived = null;
-						}
-					} catch {}
-				},
-			});
+		startAudioCapture(pid, {
+			onData: (chunk) => {
+				try {
+					audioCapture.stdin.write(chunk);
+					if (chunkReceived) {
+						chunkReceived();
+						chunkReceived = null;
+					}
+				} catch {}
+			},
+		});
 
-			await page.evaluate(() => {
+		await page.evaluate(() => {
+			const audioContext = new window.AudioContext();
+			const oscillator = audioContext.createOscillator();
+			const gain = audioContext.createGain();
+			gain.gain.value = 0.05;
+
+			oscillator.connect(gain);
+			gain.connect(audioContext.destination);
+
+			const now = audioContext.currentTime;
+			oscillator.frequency.setValueAtTime(440, now);
+
+			oscillator.start(now);
+			oscillator.stop(now + 0.5);
+		});
+
+		await audioStarted;
+		await page.waitForTimeout(1500);
+
+		console.log("audio started");
+
+		// stuff to sync video nd audio
+		await page.evaluate(async () => {
+			await new Promise<void>((res) => {
 				const audioContext = new window.AudioContext();
 				const oscillator = audioContext.createOscillator();
 				const gain = audioContext.createGain();
-				gain.gain.value = 0.05;
+				gain.gain.value = 0.1;
 
 				oscillator.connect(gain);
 				gain.connect(audioContext.destination);
 
 				const now = audioContext.currentTime;
-				oscillator.frequency.setValueAtTime(440, now);
+				oscillator.frequency.setValueAtTime(12500, now);
+
+				const flash = document.createElement("div");
+				flash.style.cssText =
+					"position:fixed;inset:0;background:white;z-index:999999;";
+				document.body.appendChild(flash);
 
 				oscillator.start(now);
 				oscillator.stop(now + 0.5);
+
+				setTimeout(() => {
+					flash.remove();
+					res();
+				}, 500);
 			});
+		});
 
-			await audioStarted;
-			await page.waitForTimeout(1500);
+		message("Started recording");
 
-			console.log("audio started");
-
-			// stuff to sync video nd audio
-			await page.evaluate(async () => {
-				await new Promise<void>((res) => {
-					const audioContext = new window.AudioContext();
-					const oscillator = audioContext.createOscillator();
-					const gain = audioContext.createGain();
-					gain.gain.value = 0.1;
-
-					oscillator.connect(gain);
-					gain.connect(audioContext.destination);
-
-					const now = audioContext.currentTime;
-					oscillator.frequency.setValueAtTime(12500, now);
-
-					const flash = document.createElement("div");
-					flash.style.cssText =
-						"position:fixed;inset:0;background:white;z-index:999999;";
-					document.body.appendChild(flash);
-
-					oscillator.start(now);
-					oscillator.stop(now + 0.5);
-
-					setTimeout(() => {
-						flash.remove();
-						res();
-					}, 500);
-				});
-			});
-
-			message("Started recording");
-
-			contextsInfo.set(inviteLink, {
-				browserServer,
-				page,
-				recording: {
-					capture,
-					audioCapture,
-					recordingPath: recordingFilePath,
-					pid,
-				},
-				sendMessages,
-				breakStartRecording: () => {
-					return "recording already started";
-				},
-			});
-		} catch (e) {
-			await browserServer.close();
-			console.error(e);
-			throw e;
-		}
-
-		rejPromise();
-
-		return;
+		contextsInfo.set(inviteLink, {
+			browserServer,
+			page,
+			recording: {
+				capture,
+				audioCapture,
+				recordingPath: recordingFilePath,
+				pid,
+			},
+			sendMessages,
+			breakStartRecording: () => {
+				return "recording already started";
+			},
+		});
+	} catch (e) {
+		await browserServer.close();
+		console.error(e);
+		throw e;
 	}
+
+	rejPromise();
+
+	return;
+}
 
 export async function endRecording(inviteLink: string) {
 	console.log("stop recording !!!!");
@@ -619,6 +628,6 @@ export async function test() {
 	return;
 }
 
-// await startRecording("https://discord.gg/TJYUAuTR", "voice", true);
+// await startRecording("https://discord.gg/TJYUAuTR", true);
 // await new Promise<void>((res) => setTimeout(res, 10 * 1000));
 // await endRecording("https://discord.gg/TJYUAuTR");

@@ -268,13 +268,32 @@ program
 		"-o, --output <outputFile>",
 		"output file path (eg. myVideos/recording.mp4 ONLY MP4)",
 	)
+	.option(
+		"-p --preset <preset>",
+		"encoding preset for ffmpeg (faster -> larger file size)",
+	)
 	.description(
 		"do not include file extension in filePath (eg. raw/video instead of raw/video.mp4)\nmerges and synchronizes recovered raw video + audio files if stopped abruptly",
 	)
 	.action(async (filePath, options) => {
+		const presetOptions = [
+			"ultrafast",
+			"superfast",
+			"veryfast",
+			"faster",
+			"fast",
+			"medium",
+			"slow",
+			"slower",
+			"veryslow",
+		];
+		if (options.preset && !presetOptions.includes(options.preset)) {
+			console.error(`preset can only be: ${presetOptions.join(", ")}`);
+			return;
+		}
 		try {
 			console.log(
-				`merged files into ${await mergeFiles(`${filePath}.mp4`, `${filePath}.m4a`, options.output)}`,
+				`merged files into ${await mergeFiles(`${filePath}.mp4`, `${filePath}.m4a`, options.preset, options.output)}`,
 			);
 		} catch (e) {
 			console.error(
