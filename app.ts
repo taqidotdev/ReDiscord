@@ -3,8 +3,7 @@ import express from "express";
 import "dotenv/config";
 import {
 	displayRecordings,
-	endRecording,
-	interruptRecording,
+	stopRecording,
 	startRecording,
 } from "./handlers.ts";
 
@@ -81,7 +80,7 @@ app.delete("/", async (req, res) => {
 		}
 
 		try {
-			endRecording(channelInviteLink).catch((e) => {
+			stopRecording(channelInviteLink).catch((e) => {
 				res.status(400).send(`Error occured while stopping recording: ${e}`);
 			});
 		} catch (e) {
@@ -89,26 +88,6 @@ app.delete("/", async (req, res) => {
 			return;
 		}
 		res.status(200).send("Recording being stopped");
-	} catch (e) {
-		if (e instanceof Error) res.status(400).send(`error occured: ${e.message}`);
-	}
-});
-
-app.delete("/interrupt", async (req, res) => {
-	try {
-		const { channelInviteLink } = req.body;
-
-		if (!channelInviteLink) {
-			res.status(400).send("Valid invite link not provided");
-		}
-
-		try {
-			interruptRecording(channelInviteLink);
-		} catch (e) {
-			res.status(400).send(`Error occured while interrupting recording: ${e}`);
-			return;
-		}
-		res.status(200).send("Recording interrupted");
 	} catch (e) {
 		if (e instanceof Error) res.status(400).send(`error occured: ${e.message}`);
 	}

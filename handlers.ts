@@ -8,11 +8,7 @@ import {
 import { type PageVideoCapture, saveVideo } from "playwright-video";
 import { startAudioCapture, stopAudioCapture } from "application-loopback";
 import "dotenv/config";
-import {
-	type ChildProcessWithoutNullStreams,
-	spawn,
-	spawnSync,
-} from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { path as ffmpegPath } from "@ffmpeg-installer/ffmpeg";
@@ -28,12 +24,11 @@ const contextsInfo: Map<
 		page?: Page;
 		recording?: {
 			capture: PageVideoCapture;
-			audioCapture: ChildProcessWithoutNullStreams;
+			audioCapture: fs.WriteStream;
 			recordingPath: string;
 			pid: string;
 		};
 		sendMessages?: boolean;
-		breakStartRecording: () => void;
 	}
 > = new Map();
 
@@ -57,13 +52,13 @@ async function calculateOffset(
 			"-i",
 			audioPath,
 			"-t",
-			"5",
+			"10",
 			"-af",
 			[
 				"highpass=f=10000",
 				"bandpass=f=12500:width_type=h:w=1000",
 				"astats=metadata=1:reset=1",
-				"silencedetect=noise=-30dB:d=0.25",
+				"silencedetect=noise=-10dB:d=0.25",
 			].join(","),
 			"-f",
 			"null",
@@ -81,7 +76,7 @@ async function calculateOffset(
 			"-i",
 			videoPath,
 			"-t",
-			"5",
+			"10",
 			"-vf",
 			"negate,blackframe=amount=98:threshold=32",
 			"-an",
@@ -115,6 +110,9 @@ export async function mergeFiles(
 		throw new Error("raw video/audio files not found");
 	}
 
+	console.log(videoPath);
+	console.log(audioPath);
+
 	const audioLength = parseFloat(
 		spawnSync(ffprobePath, [
 			"-v",
@@ -144,18 +142,22 @@ export async function mergeFiles(
 	}
 
 	const getVideoLength = () => {
-		return (
-			parseFloat(
-				spawnSync(ffprobePath, [
-					"-v",
-					"error",
-					"-show_entries",
-					"format=duration",
-					"-of",
-					"default=noprint_wrappers=1:nokey=1",
-					videoPath,
-				]).stdout.toString(),
-			) ?? 0
+		return parseFloat(
+			spawnSync(ffprobePath, [
+				"-v",
+				"error",
+				"-show_packets",
+				"-select_streams",
+				"v:0",
+				"-show_entries",
+				"packet=pts_time",
+				"-of",
+				"csv=p=0",
+				videoPath,
+			])
+				.stdout.toString()
+				.split("\n")
+				.at(-2) ?? "0",
 		);
 	};
 
@@ -184,7 +186,9 @@ export async function mergeFiles(
 
 	const filePath =
 		outputPath ??
-		`./recordings/${videoPath.split("/").at(-1) ?? videoPath.split("/").at(-2)}`;
+		`./recordings/${(videoPath.split("/").filter(Boolean).at(-1))?.replace("mkv", "mp4")}`;
+
+	console.log(filePath);
 
 	console.log(beepTimestamp);
 	console.log(flashTimestamp);
@@ -239,7 +243,9 @@ export async function startRecording(
 	streamer?: string,
 	fileName?: string,
 ) {
-	console.log([inviteLink, sendMessages, !debug, streamer, fileName]);
+	const log = (text: string) => console.log(`${inviteLink}: ${text}`);
+
+	log([inviteLink, sendMessages, !debug, streamer, fileName].toString());
 
 	if (
 		!inviteLink.match(
@@ -268,18 +274,7 @@ export async function startRecording(
 		reducedMotion: "reduce",
 	});
 
-	let rejPromise = () => {};
-
 	try {
-		new Promise<void>((res, rej) => {
-			contextsInfo.set(inviteLink, { breakStartRecording: res });
-			rejPromise = rej;
-		})
-			.then(() => {
-				throw new Error("Recording manually interrupted");
-			})
-			.catch(() => {});
-
 		const page = await context.newPage();
 
 		const message = sendMessages
@@ -341,35 +336,35 @@ export async function startRecording(
 				.click({ timeout: 10000 });
 		} catch {}
 
-		console.log("trying to show chat");
+		log("trying to show chat");
 
 		await page.getByRole("button", { name: "Show Chat" }).click();
 
-		console.log("showed chat, hiding sidebar");
+		log("showed chat, hiding sidebar");
 
 		await (deleteEntireSidebar
 			? page.locator('[class^="sidebar"]')
 			: page.getByLabel("Servers sidebar")
 		).evaluate((node) => node.remove());
 
-		console.log("hid sidebar");
+		log("hid sidebar");
 
 		if (streamer) {
 			const handleStreamClose = () => {
 				const closeStreamButton = page
 					.getByRole("button", { name: "Close Stream" })
 					.first();
-				console.log("handling stream");
+				log("handling stream");
 				closeStreamButton
 					.waitFor({ timeout: 0 })
 					.then(async () => {
 						try {
-							console.log("stream closed");
+							log("stream closed");
 							message("Stream closed, attempting to reconnect");
 							await closeStreamButton.click();
-							console.log("close stream button clicked");
+							log("close stream button clicked");
 							await watchStream();
-							console.log("watching for stream");
+							log("watching for stream");
 						} catch {}
 					})
 					.catch((e) => console.error(e));
@@ -403,7 +398,7 @@ export async function startRecording(
 
 		const recordingFilePath = `./raw/${fileName ?? `${inviteLink.split("/").at(-1) ?? inviteLink.split("/").at(-2)}-${Date.now()}`}`;
 
-		console.log(recordingFilePath);
+		log(recordingFilePath);
 
 		fs.mkdirSync("./raw", { recursive: true });
 		fs.mkdirSync("./recordings", { recursive: true });
@@ -411,36 +406,47 @@ export async function startRecording(
 		const capture = await saveVideo(
 			// @ts-expect-error
 			page,
-			`${recordingFilePath}.mp4`,
+			`${recordingFilePath}.mkv`,
 			{
 				fps: process.env.FPS,
 			},
 		);
 
-		console.log("video started");
+		log("video started");
 
-		const audioCapture = spawn(ffmpegPath, [
-			"-y",
-			"-use_wallclock_as_timestamps",
-			"1",
-			"-f",
-			"s16le",
-			"-ar",
-			"48000",
-			"-ac",
-			"2",
-			"-i",
-			"pipe:0",
-			"-af",
-			"aresample=async=1:min_hard_comp=0.100000,asetpts=PTS-STARTPTS",
-			"-c:a",
-			"aac",
-			"-g",
-			"585",
-			"-movflags",
-			"frag_keyframe+empty_moov+default_base_moof",
-			`${recordingFilePath}.m4a`,
-		]);
+		const audioCapture = spawn(
+			ffmpegPath,
+			[
+				"-y",
+				"-use_wallclock_as_timestamps",
+				"1",
+				"-f",
+				"s16le",
+				"-ar",
+				"48000",
+				"-ac",
+				"2",
+				"-i",
+				"pipe:0",
+				"-af",
+				"aresample=async=1:min_hard_comp=0.100000,asetpts=PTS-STARTPTS",
+				"-c:a",
+				"aac",
+				"-g",
+				"585",
+				"-movflags",
+				"frag_keyframe+empty_moov+default_base_moof",
+				"-frag_duration",
+				"5000000",
+				"-f",
+				"mp4",
+				"pipe:1",
+			],
+			{ stdio: ["pipe", "pipe", "inherit"] },
+		);
+
+		const fileStream = fs.createWriteStream(`${recordingFilePath}.m4a`);
+		audioCapture.stdout.pipe(fileStream);
 
 		let chunkReceived: null | (() => void);
 		const audioStarted = new Promise<void>((res) => (chunkReceived = res));
@@ -476,7 +482,7 @@ export async function startRecording(
 		await audioStarted;
 		await page.waitForTimeout(1500);
 
-		console.log("audio started");
+		log("audio started");
 
 		// stuff to sync video nd audio
 		await page.evaluate(async () => {
@@ -484,7 +490,7 @@ export async function startRecording(
 				const audioContext = new window.AudioContext();
 				const oscillator = audioContext.createOscillator();
 				const gain = audioContext.createGain();
-				gain.gain.value = 0.1;
+				gain.gain.value = 1;
 
 				oscillator.connect(gain);
 				gain.connect(audioContext.destination);
@@ -514,28 +520,24 @@ export async function startRecording(
 			page,
 			recording: {
 				capture,
-				audioCapture,
+				audioCapture: fileStream,
 				recordingPath: recordingFilePath,
 				pid,
 			},
 			sendMessages,
-			breakStartRecording: () => {
-				return "recording already started";
-			},
 		});
 	} catch (e) {
 		await browserServer.close();
+		contextsInfo.delete(inviteLink);
 		console.error(e);
 		throw e;
 	}
 
-	rejPromise();
-
 	return;
 }
 
-export async function endRecording(inviteLink: string) {
-	console.log("stop recording !!!!");
+export async function stopRecording(inviteLink: string) {
+	console.log("\n\nstop recording !!!!\n\n");
 
 	const { browserServer, page, recording, sendMessages } =
 		contextsInfo.get(inviteLink) ??
@@ -545,16 +547,12 @@ export async function endRecording(inviteLink: string) {
 				: inviteLink.slice(0, inviteLink.lastIndexOf("/")),
 		) ??
 		{};
-	console.log("ya cool");
 
 	if (!browserServer || !recording) throw new Error("Recording not found");
 	if (!page) throw new Error("Page not found");
 
-	console.log("ending audio stream");
-	recording.audioCapture.stdin.end();
-	console.log("ending audio");
+	recording.audioCapture.end();
 	stopAudioCapture(recording.pid);
-	console.log("ending video");
 	await browserServer.close();
 
 	if (sendMessages) await messageBase(page, "Stopping recording").catch();
@@ -562,22 +560,11 @@ export async function endRecording(inviteLink: string) {
 	console.log("merging");
 
 	mergeFiles(
-		`${recording.recordingPath}.mp4`,
+		`${recording.recordingPath}.mkv`,
 		`${recording.recordingPath}.m4a`,
 	);
 
 	return;
-}
-
-export function interruptRecording(inviteLink: string) {
-	const context =
-		contextsInfo.get(inviteLink) ??
-		contextsInfo.get(
-			inviteLink.split("/").at(-1)
-				? `${inviteLink}/`
-				: inviteLink.slice(0, inviteLink.lastIndexOf("/")),
-		);
-	if (context) context.breakStartRecording();
 }
 
 export function displayRecordings() {
@@ -630,4 +617,4 @@ export async function test() {
 
 // await startRecording("https://discord.gg/TJYUAuTR", true);
 // await new Promise<void>((res) => setTimeout(res, 10 * 1000));
-// await endRecording("https://discord.gg/TJYUAuTR");
+// await stopRecording("https://discord.gg/TJYUAuTR");

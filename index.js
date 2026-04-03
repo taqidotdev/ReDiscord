@@ -15,7 +15,11 @@ program
 program
 	.command("init <token>")
 	.description("intialize .env variables")
-	.option("-f, --fps <fps>", "set the fps of recordings", "30")
+	.option(
+		"-f, --fps <fps>",
+		"set the fps of recordings (higher wont help choppiness, only use for lower framerate)",
+		"30",
+	)
 	.option(
 		"-p, --port <port>",
 		"set the port for the local server to use",
@@ -182,28 +186,8 @@ program
 	);
 
 program
-	.command("interrupt-recording <channelInviteLink>")
-	.description(
-		"runs this while the recording has not started to exit without starting recording",
-	)
-	.action(async (channelInviteLink) => {
-		const data = JSON.stringify({
-			channelInviteLink,
-		});
-
-		const res = await (
-			await fetch(`http://localhost:${process.env.PORT}/interrupt`, {
-				method: "DELETE",
-				body: data,
-				headers: { "Content-Type": "application/json" },
-			})
-		).text();
-
-		console.log(res);
-	});
-
-program
 	.command("stop-recording <channelInviteLink>")
+	.description("stops the specified recording")
 	.action(async (channelInviteLink) => {
 		let recordings;
 		try {
@@ -273,7 +257,7 @@ program
 		"encoding preset for ffmpeg (faster -> larger file size)",
 	)
 	.description(
-		"do not include file extension in filePath (eg. raw/video instead of raw/video.mp4)\nmerges and synchronizes recovered raw video + audio files if stopped abruptly",
+		"merges and synchronizes raw video + audio files if stopped abruptly (ensure audio and video end at the same absolute time)\ndo not include file extension in filePath (eg. raw/video instead of raw/video.mkv)",
 	)
 	.action(async (filePath, options) => {
 		const presetOptions = [
@@ -293,7 +277,7 @@ program
 		}
 		try {
 			console.log(
-				`merged files into ${await mergeFiles(`${filePath}.mp4`, `${filePath}.m4a`, options.preset, options.output)}`,
+				`merged files into ${await mergeFiles(`${filePath}.mkv`, `${filePath}.m4a`, options.preset, options.output)}`,
 			);
 		} catch (e) {
 			console.error(
