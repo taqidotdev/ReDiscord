@@ -58,7 +58,8 @@ async function calculateOffset(
 				"highpass=f=10000",
 				"bandpass=f=12500:width_type=h:w=1000",
 				"astats=metadata=1:reset=1",
-				"silencedetect=noise=-10dB:d=0.25",
+				"silencedetect=noise=-30dB:d=0.25",
+				// "silencedetect=noise=-10dB:d=0.25",
 			].join(","),
 			"-f",
 			"null",
@@ -185,19 +186,15 @@ export async function mergeFiles(
 	);
 
 	const filePath =
-		outputPath ??
-		`./recordings/${(videoPath.split("/").filter(Boolean).at(-1))?.replace("mkv", "mp4")}`;
+		outputPath ?? `./recordings/${videoPath.split("/").filter(Boolean).at(-1)}`;
 
 	console.log(filePath);
-
-	console.log(beepTimestamp);
-	console.log(flashTimestamp);
 
 	console.log(`${videoLength}, ${audioLength}`);
 
 	const ratio = (
-		(audioLength - beepTimestamp) /
-		(videoLength - flashTimestamp)
+		(audioLength - beepTimestamp - 3) /
+		(videoLength - flashTimestamp - 3)
 	).toFixed(6);
 
 	console.log(ratio);
@@ -206,16 +203,18 @@ export async function mergeFiles(
 		ffmpegPath,
 		[
 			"-y",
+			"-ss",
+			`${flashTimestamp + 3}`,
 			"-i",
 			videoPath,
-			"-itsoffset",
-			offset,
+			"-ss",
+			`${beepTimestamp + 3}`,
 			"-i",
 			audioPath,
 			// "-ss",
-			// "5",
-			"-filter:v",
-			`setpts=${ratio}*PTS`,
+			// `${flashTimestamp + 3}`,
+			// "-filter:v",
+			// `setpts=${ratio}*PTS`,
 			"-c:v",
 			"libx264",
 			"-preset",
@@ -243,7 +242,8 @@ export async function startRecording(
 	streamer?: string,
 	fileName?: string,
 ) {
-	const log = (text: string) => console.log(`${inviteLink}: ${text}`);
+	const inviteCode = inviteLink.split("/").filter(Boolean).at(-1);
+	const log = (text: string) => console.log(`${inviteCode}: ${text}`);
 
 	log([inviteLink, sendMessages, !debug, streamer, fileName].toString());
 
@@ -406,7 +406,7 @@ export async function startRecording(
 		const capture = await saveVideo(
 			// @ts-expect-error
 			page,
-			`${recordingFilePath}.mkv`,
+			`${recordingFilePath}.mp4`,
 			{
 				fps: process.env.FPS,
 			},
@@ -537,7 +537,8 @@ export async function startRecording(
 }
 
 export async function stopRecording(inviteLink: string) {
-	console.log("\n\nstop recording !!!!\n\n");
+	const inviteCode = inviteLink.split("/").filter(Boolean).at(-1);
+	console.log(`\n\nstop recording ${inviteCode} !!!!\n\n`);
 
 	const { browserServer, page, recording, sendMessages } =
 		contextsInfo.get(inviteLink) ??
@@ -557,10 +558,10 @@ export async function stopRecording(inviteLink: string) {
 
 	if (sendMessages) await messageBase(page, "Stopping recording").catch();
 
-	console.log("merging");
+	console.log(`merging ${recording.recordingPath}`);
 
 	mergeFiles(
-		`${recording.recordingPath}.mkv`,
+		`${recording.recordingPath}.mp4`,
 		`${recording.recordingPath}.m4a`,
 	);
 
@@ -576,13 +577,14 @@ export function displayRecordings() {
 	return recordings;
 }
 
-export async function test() {
+export async function test(debug: boolean = false) {
 	const browser = await chromium.launch({
 		args: [
 			"--autoplay-policy=no-user-gesture-required",
 			"--allow-file-access-from-files",
 		],
 		ignoreDefaultArgs: ["--mute-audio"],
+		headless: !debug,
 	});
 
 	const page = await (

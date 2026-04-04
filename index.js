@@ -109,14 +109,19 @@ program
 program
 	.command("test")
 	.description(
-		"launches headless chrome for 60 seconds so that you can make sure it doesn't make any noise",
+		"launches headless chrome for a while so that you can make sure it doesn't make any noise",
 	)
-	.action(async () => {
+	.option(
+		"-d, --debug",
+		"enables debug mode (opens headed chrome instead of headless)",
+		false,
+	)
+	.action(async (options) => {
 		console.log(
 			"launching chrome, if no audio plays ensure audio_test.mp3 exists",
 		);
 
-		await test();
+		await test(options.debug);
 
 		console.log("closed chrome");
 	});
@@ -257,7 +262,7 @@ program
 		"encoding preset for ffmpeg (faster -> larger file size)",
 	)
 	.description(
-		"merges and synchronizes raw video + audio files if stopped abruptly (ensure audio and video end at the same absolute time)\ndo not include file extension in filePath (eg. raw/video instead of raw/video.mkv)",
+		"merges and synchronizes raw video + audio files if stopped abruptly (ensure audio and video end at the same absolute time)\ndo not include file extension in filePath (eg. raw/video instead of raw/video.mp4)",
 	)
 	.action(async (filePath, options) => {
 		const presetOptions = [
@@ -277,7 +282,7 @@ program
 		}
 		try {
 			console.log(
-				`merged files into ${await mergeFiles(`${filePath}.mkv`, `${filePath}.m4a`, options.preset, options.output)}`,
+				`merged files into ${await mergeFiles(`${filePath}.mp4`, `${filePath}.m4a`, options.preset, options.output)}`,
 			);
 		} catch (e) {
 			console.error(
