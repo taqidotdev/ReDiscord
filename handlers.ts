@@ -571,51 +571,41 @@ export function displayRecordings() {
 }
 
 export async function test(debug: boolean = false) {
-	const browser = await chromium.launch({
-		args: [
-			"--autoplay-policy=no-user-gesture-required",
-			"--allow-file-access-from-files",
-		],
-		ignoreDefaultArgs: ["--mute-audio"],
-		headless: !debug,
-	});
+		const browser = await chromium.launch({
+			args: [
+				"--autoplay-policy=no-user-gesture-required",
+				"--allow-file-access-from-files",
+			],
+			ignoreDefaultArgs: ["--mute-audio"],
+			headless: !debug,
+		});
 
-	const page = await (
-		await browser.newContext({
-			viewport: {
-				width: 1920,
-				height: 1080,
-			},
-			reducedMotion: "reduce",
-		})
-	).newPage();
+		const page = await (
+			await browser.newContext({
+				viewport: {
+					width: 1920,
+					height: 1080,
+				},
+				reducedMotion: "reduce",
+			})
+		).newPage();
 
-	const __dirname = path.dirname(fileURLToPath(import.meta.url));
-	const audioPath = path.resolve(__dirname, "audio_test.mp3");
+		const __dirname = path.dirname(fileURLToPath(import.meta.url));
+		const audioPath = path.resolve(__dirname, "audio_test.mp3");
 
-	await page.goto(`file://${audioPath}`);
+		await page.goto(`file://${audioPath}`);
 
-	await page
-		.evaluate(() => {
-			const audio = document.querySelector("audio");
-			if (!audio) throw new Error("audio_test.mp3 not found");
-			audio.play();
-		})
-		.catch(() => {});
+		await page
+			.evaluate(() => {
+				const audio = document.querySelector("audio");
+				if (!audio) throw new Error("audio_test.mp3 not found");
+				audio.play();
+			})
+			.catch(() => {});
 
-	await new Promise<void>((res) => setTimeout(res, 214000));
+		await new Promise<void>((res) => setTimeout(res, 214000));
 
-	await browser.close();
+		await browser.close();
 
-	return;
-}
-
-await startRecording(
-	"https://discord.gg/JeAkdERd",
-	false,
-	undefined,
-	undefined,
-	"iqat",
-);
-await new Promise<void>((res) => setTimeout(res, 60 * 1000));
-await stopRecording("https://discord.gg/JeAkdERd");
+		return;
+	}
