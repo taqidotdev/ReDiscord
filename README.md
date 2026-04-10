@@ -1,3 +1,5 @@
+<img width="924" height="313" alt="Frameasdasd 1" src="https://github.com/user-attachments/assets/859f2bc4-45ab-4ab4-a89d-b2704756ff26" />
+
 # **Re**(*dis*)**cord**
 ## Windows version
 
