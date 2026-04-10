@@ -83,11 +83,26 @@ program
 program
 	.command("stop-server")
 	.description("stops the local server")
-	.action(() => {
+	.action(async () => {
 		if (!fs.existsSync(".pid")) {
 			console.error("server is not currently running");
 			return;
 		}
+
+		try {
+			recordings = await (
+				await fetch(`http://localhost:${process.env.PORT}`, {
+					signal: AbortSignal.timeout(3000),
+				})
+			).text();
+
+			if (recordings !== "No recordings in progress") {
+				console.error(
+					`recordings are in progess, stop them first:\n${recordings}`,
+				);
+				return;
+			}
+		} catch {}
 
 		const pid = parseInt(fs.readFileSync(".pid", "utf-8"), 10);
 
@@ -142,7 +157,7 @@ program
 	)
 	.option(
 		"-f, --file-name <fileName>",
-		"name of the recording's file (no extension, myVideo NOT myVideo.mp4), leave blank to be assigned automatically",
+		"name of the recording's file (no extension, dir/myVideo NOT dir/myVideo.mp4), leave blank to be assigned automatically",
 	)
 	.option(
 		"-d, --debug",
@@ -151,7 +166,7 @@ program
 	)
 	.option(
 		"--delete-sidebar",
-		"deletes the entire sidebar instead of just the guilds tab",
+		"deletes the entire sidebar instead of just the guilds tab (makes screenshare bigger, might cut off mic icon)",
 		false,
 	)
 	.action(
@@ -282,7 +297,7 @@ program
 		}
 		try {
 			console.log(
-				`merged files into ${await mergeFiles(`${filePath}.mp4`, `${filePath}.m4a`, options.preset, options.output)}`,
+				`merged files into ${await mergeFiles(`${filePath}.mkv`, `${filePath}.m4a`, options.preset, undefined, options.output)}`,
 			);
 		} catch (e) {
 			console.error(

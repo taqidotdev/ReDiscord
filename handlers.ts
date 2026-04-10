@@ -1,4 +1,7 @@
+import { spawn, spawnSync } from "node:child_process";
 import fs, { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { startAudioCapture, stopAudioCapture } from "application-loopback";
 import {
 	type BrowserServer,
 	chromium,
@@ -6,11 +9,8 @@ import {
 	type Page,
 } from "patchright";
 import { type PageVideoCapture, saveVideo } from "playwright-video";
-import { startAudioCapture, stopAudioCapture } from "application-loopback";
 import "dotenv/config";
-import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { path as ffmpegPath } from "@ffmpeg-installer/ffmpeg";
 import { path as ffprobePath } from "@ffprobe-installer/ffprobe";
 
@@ -32,13 +32,17 @@ const contextsInfo: Map<
 	}
 > = new Map();
 
-async function messageBase(page: Page, message: string) {
+async function messageBase(
+	page: Page,
+	message: string,
+	log = console.log.bind(console),
+) {
 	try {
-		console.log(`attempting to send "${message}"`);
+		log(`attempting to send "${message}"`);
 		await page.getByRole("textbox", { name: "Message" }).fill(message);
 		await page.keyboard.press("Enter");
 	} catch (e) {
-		console.log(e);
+		console.error(e);
 	}
 }
 
@@ -58,8 +62,7 @@ async function calculateOffset(
 				"highpass=f=10000",
 				"bandpass=f=12500:width_type=h:w=1000",
 				"astats=metadata=1:reset=1",
-				"silencedetect=noise=-30dB:d=0.25",
-				// "silencedetect=noise=-10dB:d=0.25",
+				"silencedetect=noise=-10dB:d=0.25",
 			].join(","),
 			"-f",
 			"null",
@@ -91,9 +94,6 @@ async function calculateOffset(
 	const videoMatch = videoResult.stderr.match(/t:(\d+\.\d+)/);
 	const flashTimestamp = videoMatch ? parseFloat(videoMatch[1]) : 0;
 
-	console.log(flashTimestamp);
-	console.log(beepTimestamp);
-
 	return {
 		offset: (flashTimestamp - beepTimestamp).toFixed(6).toString(),
 		beepTimestamp,
@@ -110,9 +110,6 @@ export async function mergeFiles(
 	if (!existsSync(videoPath) || !existsSync(audioPath)) {
 		throw new Error("raw video/audio files not found");
 	}
-
-	console.log(videoPath);
-	console.log(audioPath);
 
 	const audioLength = parseFloat(
 		spawnSync(ffprobePath, [
@@ -166,9 +163,8 @@ export async function mergeFiles(
 
 	for (let i = 0; i < 50; i++) {
 		videoLength = getVideoLength();
-		console.log(videoLength);
 		if (!videoLength || Number.isNaN(videoLength) || videoLength <= 0) {
-			await new Promise<void>((res) => setTimeout(res, 2000));
+			await new Promise<void>((res) => setTimeout(res, 5 * 2000));
 			continue;
 		}
 		break;
@@ -178,43 +174,33 @@ export async function mergeFiles(
 		throw new Error("Could not get video length (check for corruption)");
 	}
 
-	console.log(`${videoLength}, ${audioLength}`);
-
-	const { offset, beepTimestamp, flashTimestamp } = await calculateOffset(
+	const { beepTimestamp, flashTimestamp } = await calculateOffset(
 		videoPath,
 		audioPath,
 	);
 
-	const filePath =
-		outputPath ?? `./recordings/${videoPath.split("/").filter(Boolean).at(-1)}`;
+	const filePath = outputPath
+		? outputPath.match(/\.mp4$/)
+			? outputPath
+			: `${outputPath}.mp4`
+		: `./recordings/${videoPath.split("/").filter(Boolean).at(-1)?.replace("mkv", "mp4")}`;
 
-	console.log(filePath);
-
-	console.log(`${videoLength}, ${audioLength}`);
-
-	const ratio = (
-		(audioLength - beepTimestamp - 3) /
-		(videoLength - flashTimestamp - 3)
-	).toFixed(6);
-
-	console.log(ratio);
+	console.log(`writing video to ${filePath}`);
 
 	spawnSync(
 		ffmpegPath,
 		[
 			"-y",
 			"-ss",
-			`${flashTimestamp + 3}`,
+			`${flashTimestamp}`,
 			"-i",
 			videoPath,
 			"-ss",
-			`${beepTimestamp + 3}`,
+			`${beepTimestamp}`,
 			"-i",
 			audioPath,
-			// "-ss",
-			// `${flashTimestamp + 3}`,
-			// "-filter:v",
-			// `setpts=${ratio}*PTS`,
+			"-ss",
+			`${flashTimestamp + 2}`,
 			"-c:v",
 			"libx264",
 			"-preset",
@@ -230,7 +216,6 @@ export async function mergeFiles(
 		{ stdio: "inherit" },
 	);
 
-	console.log("merged");
 	return filePath;
 }
 
@@ -245,7 +230,9 @@ export async function startRecording(
 	const inviteCode = inviteLink.split("/").filter(Boolean).at(-1);
 	const log = (text: string) => console.log(`${inviteCode}: ${text}`);
 
-	log([inviteLink, sendMessages, !debug, streamer, fileName].toString());
+	log(
+		`starting recording for ${inviteLink}, ${sendMessages ? "messages on" : "messages off"}, headless is ${!debug}, watching ${streamer ?? "no one"}'s stream${fileName ? `will save to ${fileName}` : ""}`,
+	);
 
 	if (
 		!inviteLink.match(
@@ -278,7 +265,7 @@ export async function startRecording(
 		const page = await context.newPage();
 
 		const message = sendMessages
-			? (message: string) => messageBase(page, message)
+			? (message: string) => messageBase(page, message, log)
 			: () => {};
 
 		const res = await page.goto(inviteLink);
@@ -351,23 +338,24 @@ export async function startRecording(
 
 		if (streamer) {
 			const handleStreamClose = () => {
-				const closeStreamButton = page
-					.getByRole("button", { name: "Close Stream" })
-					.first();
-				log("handling stream");
-				closeStreamButton
-					.waitFor({ timeout: 0 })
-					.then(async () => {
-						try {
-							log("stream closed");
-							message("Stream closed, attempting to reconnect");
-							await closeStreamButton.click();
-							log("close stream button clicked");
-							await watchStream();
-							log("watching for stream");
-						} catch {}
-					})
-					.catch((e) => console.error(e));
+				try {
+					const closeStreamButton = page
+						.getByRole("button", { name: "Close Stream" })
+						.first();
+					log("handling stream");
+					closeStreamButton
+						.waitFor({ timeout: 0 })
+						.then(async () => {
+							try {
+								message("Stream closed, attempting to reconnect");
+								await closeStreamButton.click();
+								log("close stream button clicked");
+								await watchStream();
+								log("watching for stream");
+							} catch {}
+						})
+						.catch(() => {});
+				} catch {}
 			};
 
 			const watchStream: (
@@ -403,17 +391,6 @@ export async function startRecording(
 		fs.mkdirSync("./raw", { recursive: true });
 		fs.mkdirSync("./recordings", { recursive: true });
 
-		const capture = await saveVideo(
-			// @ts-expect-error
-			page,
-			`${recordingFilePath}.mp4`,
-			{
-				fps: process.env.FPS,
-			},
-		);
-
-		log("video started");
-
 		const audioCapture = spawn(
 			ffmpegPath,
 			[
@@ -429,11 +406,9 @@ export async function startRecording(
 				"-i",
 				"pipe:0",
 				"-af",
-				"aresample=async=1:min_hard_comp=0.100000,asetpts=PTS-STARTPTS",
+				"aresample=resampler=soxr:precision=28,asetpts=PTS-STARTPTS",
 				"-c:a",
 				"aac",
-				"-g",
-				"585",
 				"-movflags",
 				"frag_keyframe+empty_moov+default_base_moof",
 				"-frag_duration",
@@ -444,6 +419,18 @@ export async function startRecording(
 			],
 			{ stdio: ["pipe", "pipe", "inherit"] },
 		);
+
+		const capture = await saveVideo(
+			// @ts-expect-error
+			page,
+			`${recordingFilePath}.mkv`,
+			{
+				fps: parseInt(process.env.FPS ?? "30", 10),
+				followPopups: false,
+			},
+		);
+
+		log("video started");
 
 		const fileStream = fs.createWriteStream(`${recordingFilePath}.m4a`);
 		audioCapture.stdout.pipe(fileStream);
@@ -538,7 +525,7 @@ export async function startRecording(
 
 export async function stopRecording(inviteLink: string) {
 	const inviteCode = inviteLink.split("/").filter(Boolean).at(-1);
-	console.log(`\n\nstop recording ${inviteCode} !!!!\n\n`);
+	console.log(`\n\nstopping recording ${inviteCode} !!!!\n\n`);
 
 	const { browserServer, page, recording, sendMessages } =
 		contextsInfo.get(inviteLink) ??
@@ -552,18 +539,24 @@ export async function stopRecording(inviteLink: string) {
 	if (!browserServer || !recording) throw new Error("Recording not found");
 	if (!page) throw new Error("Page not found");
 
-	recording.audioCapture.end();
-	stopAudioCapture(recording.pid);
-	await browserServer.close();
-
 	if (sendMessages) await messageBase(page, "Stopping recording").catch();
 
-	console.log(`merging ${recording.recordingPath}`);
+	recording.capture
+		.stop()
+		.then(() =>
+			mergeFiles(
+				`${recording.recordingPath}.mkv`,
+				`${recording.recordingPath}.m4a`,
+				undefined,
+			),
+		);
+	browserServer.close();
+	recording.audioCapture.end();
+	stopAudioCapture(recording.pid);
 
-	mergeFiles(
-		`${recording.recordingPath}.mp4`,
-		`${recording.recordingPath}.m4a`,
-	);
+	contextsInfo.delete(inviteLink);
+
+	console.log(`merging ${recording.recordingPath}\n\n`);
 
 	return;
 }
@@ -617,6 +610,12 @@ export async function test(debug: boolean = false) {
 	return;
 }
 
-// await startRecording("https://discord.gg/TJYUAuTR", true);
-// await new Promise<void>((res) => setTimeout(res, 10 * 1000));
-// await stopRecording("https://discord.gg/TJYUAuTR");
+await startRecording(
+	"https://discord.gg/JeAkdERd",
+	false,
+	undefined,
+	undefined,
+	"iqat",
+);
+await new Promise<void>((res) => setTimeout(res, 60 * 1000));
+await stopRecording("https://discord.gg/JeAkdERd");
