@@ -210,7 +210,7 @@ export async function mergeFiles(
 			"-map",
 			"0:v:0",
 			"-map",
-			"1:a:0",
+			"1:a:0?",
 			filePath,
 		],
 		{ stdio: "inherit" },
